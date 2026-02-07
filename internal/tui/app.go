@@ -116,6 +116,11 @@ type Model struct {
 	homeSort       store.SortMode
 	homeTopRange   store.TopRange
 	homeNewPending int
+	homeNewCur     *string
+	homeTopCur     *store.HomeTopCursor
+	homeHotCur     *store.HomeHotCursor
+	homeHasMore    bool
+	homeLoading    bool
 
 	threadRootID string
 	threadItems  []threadItem
@@ -174,6 +179,7 @@ func NewApp(appName string, st Store, broker *pubsub.Broker[pubsub.Event], user 
 		input:             ti,
 		homeSort:          store.SortHot,
 		homeTopRange:      store.TopWeek,
+		homeLoading:       true,
 		feedSort:          store.SortHot,
 		feedTopRange:      store.TopWeek,
 		unreadByCommunity: make(map[string]int),
@@ -218,7 +224,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// spinner tick
 	if _, ok := msg.(feedSpinTickMsg); ok {
-		if m.feedLoading {
+		if m.feedLoading || m.homeLoading {
 			m.feedSpinIdx = (m.feedSpinIdx + 1) % len(spinnerFrames)
 		}
 		return m, tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg { return feedSpinTickMsg{} })
@@ -327,6 +333,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case homeLoadedMsg:
 		if msg.err != nil {
 			m.flashErr("Something went wrong. Try again.")
+			m.homeLoading = false
 			return m, nil
 		}
 		if msg.append {
@@ -336,10 +343,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.homeOffset = 0
 			m.homeSel = 0
 			m.homeNewPending = 0
+			m.homeNewCur = nil
+			m.homeTopCur = nil
+			m.homeHotCur = nil
 		}
 		if m.homeSel >= len(m.homeItems) {
 			m.homeSel = max(0, len(m.homeItems)-1)
 		}
+		m.homeNewCur = msg.nextNew
+		m.homeTopCur = msg.nextTop
+		m.homeHotCur = msg.nextHot
+		m.homeHasMore = msg.hasMore
+		m.homeLoading = false
 		return m, nil
 	case threadLoadedMsg:
 		if msg.err != nil {
@@ -580,6 +595,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			case "h":
 				m.v = viewHome
+				m.homeLoading = true
 				return m, m.cmdLoadHomeReset()
 			case "c":
 				m.v = viewCommunities
@@ -603,6 +619,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "s":
 				if m.v == viewHome {
 					m.cycleHomeSort()
+					m.homeLoading = true
 					return m, m.cmdLoadHomeReset()
 				}
 				if m.v == viewRoom {
@@ -614,6 +631,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "t":
 				if m.v == viewHome && m.homeSort == store.SortTop {
 					m.cycleHomeTopRange()
+					m.homeLoading = true
 					return m, m.cmdLoadHomeReset()
 				}
 				if m.v == viewRoom && m.feedSort == store.SortTop {
@@ -643,9 +661,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.homeSel < len(m.homeItems)-1 {
 					m.homeSel++
 					// mimic "infinite scroll": load more when we reach the end.
-					if m.homeSel >= len(m.homeItems)-1 {
+					if m.homeSel >= len(m.homeItems)-1 && m.homeHasMore && !m.homeLoading {
+						m.homeLoading = true
 						return m, m.cmdLoadHomeMore()
 					}
+				}
+				if m.homeSel >= len(m.homeItems)-1 && m.homeHasMore && !m.homeLoading {
+					m.homeLoading = true
+					return m, m.cmdLoadHomeMore()
 				}
 				return m, nil
 			case "enter":
@@ -926,6 +949,11 @@ func (m Model) viewHome() string {
 	}
 
 	if len(m.homeItems) == 0 {
+		if m.homeLoading {
+			b.WriteString(spinnerFrames[m.feedSpinIdx%len(spinnerFrames)])
+			b.WriteString("\n")
+			return b.String()
+		}
 		b.WriteString("(no posts yet)\n")
 		b.WriteString("\nNav: up/down select, Enter open thread, s cycle sort, t cycle top range, r refresh.\n")
 		return b.String()
@@ -947,6 +975,10 @@ func (m Model) viewHome() string {
 		b.WriteString(fmt.Sprintf("%s%s · #%s · %s · %s\n", sel, it.CommunityName, it.RoomName, author, relTime(it.CreatedAt)))
 		b.WriteString(wrap(content, max(20, mw-6)))
 		b.WriteString(fmt.Sprintf("\n(%d↑ %d💬)\n\n", it.Upvotes, it.Replies))
+	}
+	if m.homeLoading {
+		b.WriteString(spinnerFrames[m.feedSpinIdx%len(spinnerFrames)])
+		b.WriteString("\n\n")
 	}
 	b.WriteString("Nav: up/down select, Enter open thread, s cycle sort, t cycle top range, r refresh. Tab toggles input/nav.\n")
 	return b.String()
@@ -1274,9 +1306,13 @@ func (m Model) cmdLoadExplore() tea.Cmd {
 }
 
 type homeLoadedMsg struct {
-	items  []store.FeedMessage
-	append bool
-	err    error
+	items   []store.FeedMessage
+	append  bool
+	hasMore bool
+	nextNew *string
+	nextTop *store.HomeTopCursor
+	nextHot *store.HomeHotCursor
+	err     error
 }
 
 func (m Model) cmdLoadHomeReset() tea.Cmd {
@@ -1289,24 +1325,53 @@ func (m Model) cmdLoadHomeReset() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		items, err := m.st.ListHomeFeed(ctx, userID, sortMode, topRange, 30, 0)
-		return homeLoadedMsg{items: items, append: false, err: err}
+		switch sortMode {
+		case store.SortNew:
+			items, next, err := m.st.ListHomeNewPage(ctx, userID, 30, nil)
+			return homeLoadedMsg{items: items, append: false, hasMore: next != nil, nextNew: next, err: err}
+		case store.SortTop:
+			items, next, err := m.st.ListHomeTopPage(ctx, userID, topRange, 30, nil)
+			return homeLoadedMsg{items: items, append: false, hasMore: next != nil, nextTop: next, err: err}
+		case store.SortHot:
+			items, next, err := m.st.ListHomeHotPage(ctx, userID, time.Now().UTC(), 30, nil)
+			return homeLoadedMsg{items: items, append: false, hasMore: next != nil, nextHot: next, err: err}
+		default:
+			items, next, err := m.st.ListHomeNewPage(ctx, userID, 30, nil)
+			return homeLoadedMsg{items: items, append: false, hasMore: next != nil, nextNew: next, err: err}
+		}
 	}
 }
 
 func (m Model) cmdLoadHomeMore() tea.Cmd {
+	if !m.homeHasMore {
+		return nil
+	}
 	userID := ""
 	if m.user != nil {
 		userID = m.user.ID
 	}
 	sortMode := m.homeSort
 	topRange := m.homeTopRange
-	offset := len(m.homeItems)
+	beforeNew := m.homeNewCur
+	beforeTop := m.homeTopCur
+	beforeHot := m.homeHotCur
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		items, err := m.st.ListHomeFeed(ctx, userID, sortMode, topRange, 30, offset)
-		return homeLoadedMsg{items: items, append: true, err: err}
+		switch sortMode {
+		case store.SortNew:
+			items, next, err := m.st.ListHomeNewPage(ctx, userID, 30, beforeNew)
+			return homeLoadedMsg{items: items, append: true, hasMore: next != nil, nextNew: next, err: err}
+		case store.SortTop:
+			items, next, err := m.st.ListHomeTopPage(ctx, userID, topRange, 30, beforeTop)
+			return homeLoadedMsg{items: items, append: true, hasMore: next != nil, nextTop: next, err: err}
+		case store.SortHot:
+			items, next, err := m.st.ListHomeHotPage(ctx, userID, time.Now().UTC(), 30, beforeHot)
+			return homeLoadedMsg{items: items, append: true, hasMore: next != nil, nextHot: next, err: err}
+		default:
+			items, next, err := m.st.ListHomeNewPage(ctx, userID, 30, beforeNew)
+			return homeLoadedMsg{items: items, append: true, hasMore: next != nil, nextNew: next, err: err}
+		}
 	}
 }
 

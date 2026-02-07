@@ -51,6 +51,18 @@ func (s *storeWithEvents) ListHomeFeed(ctx context.Context, userID string, sortM
 	return s.st.ListHomeFeed(ctx, userID, sortMode, topRange, limit, offset)
 }
 
+func (s *storeWithEvents) ListHomeNewPage(ctx context.Context, userID string, limit int, beforeID *string) ([]store.FeedMessage, *string, error) {
+	return s.st.ListHomeNewPage(ctx, userID, limit, beforeID)
+}
+
+func (s *storeWithEvents) ListHomeTopPage(ctx context.Context, userID string, topRange store.TopRange, limit int, before *store.HomeTopCursor) ([]store.FeedMessage, *store.HomeTopCursor, error) {
+	return s.st.ListHomeTopPage(ctx, userID, topRange, limit, before)
+}
+
+func (s *storeWithEvents) ListHomeHotPage(ctx context.Context, userID string, now time.Time, limit int, before *store.HomeHotCursor) ([]store.FeedMessage, *store.HomeHotCursor, error) {
+	return s.st.ListHomeHotPage(ctx, userID, now, limit, before)
+}
+
 func (s *storeWithEvents) ListRoomsByCommunity(ctx context.Context, communityID string) ([]store.Room, error) {
 	return s.st.ListRoomsByCommunity(ctx, communityID)
 }

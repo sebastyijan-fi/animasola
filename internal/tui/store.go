@@ -17,6 +17,9 @@ type Store interface {
 	ListExploreCommunities(ctx context.Context, userID string, limit int) ([]store.Community, error)
 	ListJoinedCommunities(ctx context.Context, userID string) ([]store.Community, error)
 	ListHomeFeed(ctx context.Context, userID string, sortMode store.SortMode, topRange store.TopRange, limit, offset int) ([]store.FeedMessage, error)
+	ListHomeNewPage(ctx context.Context, userID string, limit int, beforeID *string) ([]store.FeedMessage, *string, error)
+	ListHomeTopPage(ctx context.Context, userID string, topRange store.TopRange, limit int, before *store.HomeTopCursor) ([]store.FeedMessage, *store.HomeTopCursor, error)
+	ListHomeHotPage(ctx context.Context, userID string, now time.Time, limit int, before *store.HomeHotCursor) ([]store.FeedMessage, *store.HomeHotCursor, error)
 	ListRoomsByCommunity(ctx context.Context, communityID string) ([]store.Room, error)
 	GetRoomByID(ctx context.Context, id string) (*store.Room, error)
 	UpsertReadPosition(ctx context.Context, userID, roomID, lastReadMessageID string) error

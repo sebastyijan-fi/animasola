@@ -15,6 +15,7 @@ type fakeStore struct {
 	explore []store.Community
 	rooms   map[string][]store.Room
 	feed    map[string][]store.FeedMessage
+	home    []store.FeedMessage
 
 	created []*store.Community
 }
@@ -52,6 +53,35 @@ func (f *fakeStore) ListJoinedCommunities(ctx context.Context, userID string) ([
 }
 func (f *fakeStore) ListHomeFeed(ctx context.Context, userID string, sortMode store.SortMode, topRange store.TopRange, limit, offset int) ([]store.FeedMessage, error) {
 	return nil, nil
+}
+func (f *fakeStore) ListHomeNewPage(ctx context.Context, userID string, limit int, beforeID *string) ([]store.FeedMessage, *string, error) {
+	items := f.home
+	start := 0
+	if beforeID != nil {
+		for i := range items {
+			if items[i].ID == *beforeID {
+				start = i + 1
+				break
+			}
+		}
+	}
+	end := start + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	out := append([]store.FeedMessage(nil), items[start:end]...)
+	var next *string
+	if len(out) == limit {
+		id := out[len(out)-1].ID
+		next = &id
+	}
+	return out, next, nil
+}
+func (f *fakeStore) ListHomeTopPage(ctx context.Context, userID string, topRange store.TopRange, limit int, before *store.HomeTopCursor) ([]store.FeedMessage, *store.HomeTopCursor, error) {
+	return nil, nil, nil
+}
+func (f *fakeStore) ListHomeHotPage(ctx context.Context, userID string, now time.Time, limit int, before *store.HomeHotCursor) ([]store.FeedMessage, *store.HomeHotCursor, error) {
+	return nil, nil, nil
 }
 func (f *fakeStore) ListRoomsByCommunity(ctx context.Context, communityID string) ([]store.Room, error) {
 	return f.rooms[communityID], nil
@@ -283,5 +313,51 @@ func TestRoomFeedPaginationLoadsMoreAtBottom(t *testing.T) {
 	}
 	if m.feed[2].ID != "m1" {
 		t.Fatalf("expected last item m1, got %q", m.feed[2].ID)
+	}
+}
+
+func TestHomeFeedPaginationLoadsMoreAtBottom(t *testing.T) {
+	fs := &fakeStore{
+		joined: []store.Community{{ID: "c1", Name: "rust"}},
+		home: []store.FeedMessage{
+			{Message: store.Message{ID: "m3"}, CommunityName: "rust", RoomName: "general", AuthorUsername: "a"},
+			{Message: store.Message{ID: "m2"}, CommunityName: "rust", RoomName: "general", AuthorUsername: "a"},
+			{Message: store.Message{ID: "m1"}, CommunityName: "rust", RoomName: "general", AuthorUsername: "a"},
+		},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	m.v = viewHome
+	m.homeSort = store.SortNew
+	m.focus = focusMain
+	m.mainFocus = mainNav
+
+	m.homeLoading = true
+	model := applyCmd(t, m, m.cmdLoadHomeReset())
+	m = model.(Model)
+	if len(m.homeItems) != 3 {
+		t.Fatalf("expected initial home loaded, got %d", len(m.homeItems))
+	}
+
+	// Force a small page size by pretending we have more and a cursor.
+	m.homeItems = m.homeItems[:2]
+	m.homeSel = len(m.homeItems) - 1
+	cur := m.homeItems[len(m.homeItems)-1].ID
+	m.homeNewCur = &cur
+	m.homeHasMore = true
+	m.homeLoading = false
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected load more cmd at bottom")
+	}
+	model = applyCmd(t, m, cmd)
+	m = model.(Model)
+	if len(m.homeItems) != 3 {
+		t.Fatalf("expected home appended, got %d", len(m.homeItems))
+	}
+	if m.homeItems[2].ID != "m1" {
+		t.Fatalf("expected last item m1, got %q", m.homeItems[2].ID)
 	}
 }
