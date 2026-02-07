@@ -625,3 +625,34 @@ func TestMouseClickHomeHeaderCyclesSort(t *testing.T) {
 		t.Fatalf("expected reload cmd")
 	}
 }
+
+func TestMouseClickHomeHeaderCyclesTopRangeWhenTop(t *testing.T) {
+	fs := &fakeStore{
+		joined: []store.Community{{ID: "c1", Name: "rust"}},
+		home: []store.FeedMessage{
+			{Message: store.Message{ID: "m1", RoomID: "r1"}, CommunityName: "rust", RoomName: "general", AuthorUsername: "a"},
+		},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = model.(Model)
+	model = applyCmd(t, m, m.cmdLoadJoined())
+	m = model.(Model)
+	m.v = viewHome
+	m.homeSort = store.SortTop
+	m.homeTopRange = store.TopWeek
+	m.focus = focusMain
+	m.mainFocus = mainNav
+
+	clickY := 2 + 0
+	clickX := 21 + 5
+	model, cmd := m.Update(tea.MouseMsg{X: clickX, Y: clickY, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	m = model.(Model)
+	if m.homeTopRange == store.TopWeek {
+		t.Fatalf("expected top range to cycle")
+	}
+	if cmd == nil {
+		t.Fatalf("expected reload cmd")
+	}
+}

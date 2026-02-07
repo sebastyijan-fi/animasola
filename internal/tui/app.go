@@ -1704,7 +1704,11 @@ func (m Model) handleMouseHomeClick(mainY int, relX int) (tea.Model, tea.Cmd) {
 	// then items
 	// Click in the first line cycles sort.
 	if mainY == 0 {
-		m.cycleHomeSort()
+		if m.homeSort == store.SortTop {
+			m.cycleHomeTopRange()
+		} else {
+			m.cycleHomeSort()
+		}
 		m.homeLoading = true
 		return m, m.cmdLoadHomeReset()
 	}
@@ -1746,7 +1750,11 @@ func (m Model) handleMouseRoomClick(mainY int, relX int) (tea.Model, tea.Cmd) {
 	// then items
 	// Click in the first line cycles sort.
 	if mainY == 0 {
-		m.cycleFeedSort()
+		if m.feedSort == store.SortTop {
+			m.cycleFeedTopRange()
+		} else {
+			m.cycleFeedSort()
+		}
 		m.feedLoading = true
 		return m, m.cmdLoadFeedReset()
 	}
