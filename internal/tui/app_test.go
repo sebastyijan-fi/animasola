@@ -132,13 +132,11 @@ func TestTypingDoesNotTriggerShortcuts(t *testing.T) {
 		t.Fatalf("expected input to capture typed rune")
 	}
 
-	// Leave input and ensure shortcut works.
-	model, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	m = model.(Model)
-	model, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	// Global shortcuts use Alt-modified keys so they don't conflict with typing.
+	model, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c"), Alt: true})
 	m = model.(Model)
 	if m.v != viewCommunities {
-		t.Fatalf("expected to navigate to communities view, got %v", m.v)
+		t.Fatalf("expected alt+c to navigate to communities view, got %v", m.v)
 	}
 }
 

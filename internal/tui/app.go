@@ -408,6 +408,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cancel()
 			}
 			return m, tea.Quit
+		// Global shortcuts that should work even while typing.
+		// We use Alt-modified keys to avoid conflicting with normal text entry.
+		case "alt+q":
+			if m.cancel != nil {
+				m.cancel()
+			}
+			return m, tea.Quit
+		case "alt+h":
+			m.v = viewHome
+			return m, m.cmdLoadHomeReset()
+		case "alt+c":
+			m.v = viewCommunities
+			return m, m.cmdLoadJoined()
+		case "alt+e":
+			m.v = viewExplore
+			return m, m.cmdLoadExplore()
 		case "tab":
 			if m.sidebarVisible() {
 				if m.focus == focusMain {
@@ -416,17 +432,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.input.Blur()
 				} else {
 					m.focus = focusMain
+					m.mainFocus = mainInput
+					m.input.Focus()
 				}
 				m.rebuildSidebarItems()
 				return m, nil
 			}
 			return m, nil
 		case "esc":
-			if m.focus == focusMain && m.mainFocus == mainInput {
-				m.mainFocus = mainNav
-				m.input.Blur()
-				return m, nil
-			}
 			return (&m).pop()
 		}
 
@@ -454,16 +467,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.focus == focusMain && m.mainFocus == mainNav {
-			// Allow typing to re-focus the input after Esc, without stealing single-key shortcuts.
-			if km.Type == tea.KeyRunes && len(km.Runes) == 1 {
-				r := km.Runes[0]
-				if r == '/' || r == ' ' || !isShortcutRune(r) {
-					m.mainFocus = mainInput
-					m.input.Focus()
-					var cmd tea.Cmd
-					m.input, cmd = m.input.Update(km)
-					return m, cmd
-				}
+			// If the user starts typing while in nav mode, switch back to input.
+			// This prevents "hello" from triggering `h` etc after a focus change.
+			// Alt-modified keys still act as shortcuts (handled above).
+			if km.Type == tea.KeyRunes && len(km.Runes) == 1 && !km.Alt {
+				m.mainFocus = mainInput
+				m.input.Focus()
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(km)
+				return m, cmd
 			}
 
 			switch km.String() {
