@@ -424,6 +424,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "alt+e":
 			m.v = viewExplore
 			return m, m.cmdLoadExplore()
+		case "alt+r":
+			switch m.v {
+			case viewRoom, viewThread:
+				return m.startReply()
+			case viewHome:
+				return m, m.cmdLoadHomeReset()
+			default:
+				return m, nil
+			}
+		case "alt+u":
+			return m, m.cmdToggleUpvote()
+		case "alt+d":
+			return m.startDeleteConfirm()
+		case "alt+s":
+			if m.v == viewHome {
+				m.cycleHomeSort()
+				return m, m.cmdLoadHomeReset()
+			}
+			return m, nil
+		case "alt+t":
+			if m.v == viewHome && m.homeSort == store.SortTop {
+				m.cycleHomeTopRange()
+				return m, m.cmdLoadHomeReset()
+			}
+			return m, nil
 		case "tab":
 			if m.sidebarVisible() {
 				if m.focus == focusMain {
@@ -440,6 +465,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "esc":
+			if m.focus == focusMain && m.mainFocus == mainInput {
+				m.mainFocus = mainNav
+				m.input.Blur()
+				return m, nil
+			}
 			return (&m).pop()
 		}
 
@@ -467,15 +497,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.focus == focusMain && m.mainFocus == mainNav {
-			// If the user starts typing while in nav mode, switch back to input.
-			// This prevents "hello" from triggering `h` etc after a focus change.
-			// Alt-modified keys still act as shortcuts (handled above).
+			// Allow typing to re-focus the input after Esc/Tab, without stealing single-key shortcuts.
+			// Alt-modified keys are handled above.
 			if km.Type == tea.KeyRunes && len(km.Runes) == 1 && !km.Alt {
-				m.mainFocus = mainInput
-				m.input.Focus()
-				var cmd tea.Cmd
-				m.input, cmd = m.input.Update(km)
-				return m, cmd
+				r := km.Runes[0]
+				if r == '/' || r == ' ' || !isShortcutRune(r) {
+					m.mainFocus = mainInput
+					m.input.Focus()
+					var cmd tea.Cmd
+					m.input, cmd = m.input.Update(km)
+					return m, cmd
+				}
 			}
 
 			switch km.String() {
@@ -524,7 +556,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// local navigation per view
 	if km, ok := msg.(tea.KeyMsg); ok {
-		if m.focus != focusMain {
+		if m.focus != focusMain || m.mainFocus != mainNav {
 			goto input
 		}
 		switch m.v {
