@@ -46,3 +46,12 @@ const (
 	SortTop SortMode = "top"
 	SortHot SortMode = "hot"
 )
+
+type TopRange string
+
+const (
+	TopToday TopRange = "today"
+	TopWeek  TopRange = "week"
+	TopMonth TopRange = "month"
+	TopAll   TopRange = "all"
+)

@@ -8,15 +8,6 @@ import (
 	"time"
 )
 
-type TopRange string
-
-const (
-	TopToday TopRange = "today"
-	TopWeek  TopRange = "week"
-	TopMonth TopRange = "month"
-	TopAll   TopRange = "all"
-)
-
 func (s *Store) ListHomeFeed(ctx context.Context, userID string, sortMode SortMode, topRange TopRange, limit, offset int) ([]FeedMessage, error) {
 	switch sortMode {
 	case SortNew:
