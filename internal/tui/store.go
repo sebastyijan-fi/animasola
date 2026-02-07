@@ -14,6 +14,7 @@ type Store interface {
 	GetCommunityByName(ctx context.Context, name string) (*store.Community, error)
 	GetCommunityByID(ctx context.Context, id string) (*store.Community, error)
 	JoinCommunity(ctx context.Context, userID, communityID string) error
+	LeaveCommunity(ctx context.Context, userID, communityID string) error
 	ListExploreCommunities(ctx context.Context, userID string, limit int) ([]store.Community, error)
 	ListJoinedCommunities(ctx context.Context, userID string) ([]store.Community, error)
 	ListHomeFeed(ctx context.Context, userID string, sortMode store.SortMode, topRange store.TopRange, limit, offset int) ([]store.FeedMessage, error)

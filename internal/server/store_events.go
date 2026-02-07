@@ -39,6 +39,11 @@ func (s *storeWithEvents) JoinCommunity(ctx context.Context, userID, communityID
 	return err
 }
 
+func (s *storeWithEvents) LeaveCommunity(ctx context.Context, userID, communityID string) error {
+	// v1 doesn't broadcast leave events yet; clients refresh membership/unreads on demand.
+	return s.st.LeaveCommunity(ctx, userID, communityID)
+}
+
 func (s *storeWithEvents) ListExploreCommunities(ctx context.Context, userID string, limit int) ([]store.Community, error) {
 	return s.st.ListExploreCommunities(ctx, userID, limit)
 }

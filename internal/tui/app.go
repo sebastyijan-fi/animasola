@@ -134,6 +134,10 @@ type Model struct {
 	deleteConfirm  bool
 	deleteTargetID string
 
+	leaveConfirm     bool
+	leaveCommunityID string
+	leaveCommunity   string
+
 	input textinput.Model
 
 	searchOpen    bool
@@ -473,6 +477,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.v = viewCommunity
 		m.push(nav{v: viewExplore})
 		return m, tea.Batch(m.cmdLoadJoined(), m.cmdLoadRooms(msg.community.ID))
+	case leftCommunityMsg:
+		if msg.err != nil {
+			m.flashErr("Could not leave community.")
+			return m, nil
+		}
+		m.v = viewHome
+		m.curCommunity = nil
+		m.curRoom = nil
+		m.threadRootID = ""
+		m.replyToID = nil
+		m.replyToUsername = ""
+		m.homeLoading = true
+		return m, tea.Batch(m.cmdLoadJoined(), m.cmdLoadUnread(), m.cmdLoadHomeReset())
 	case postedMsg:
 		if msg.err != nil {
 			m.flashErr("Could not post.")
@@ -589,6 +606,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "n", "esc":
 				m.deleteConfirm = false
 				m.deleteTargetID = ""
+				return m, nil
+			default:
+				return m, nil
+			}
+		}
+
+		if m.leaveConfirm {
+			switch km.String() {
+			case "y":
+				m.leaveConfirm = false
+				cid := m.leaveCommunityID
+				m.leaveCommunityID = ""
+				m.leaveCommunity = ""
+				return m, m.cmdLeaveCommunity(cid)
+			case "n", "esc":
+				m.leaveConfirm = false
+				m.leaveCommunityID = ""
+				m.leaveCommunity = ""
 				return m, nil
 			default:
 				return m, nil
@@ -1402,9 +1437,9 @@ func (m *Model) handleCreateFlow(line string) tea.Cmd {
 }
 
 func (m *Model) execCommand(cmd *Command) tea.Cmd {
-	switch cmd.Name {
+	switch strings.ToLower(cmd.Name) {
 	case "help":
-		m.flashErr("Commands: /explore /join <community> /create-community /search <query>")
+		m.flashErr("Commands: /explore /join <community> /leave <community> /create-community /search <query> /quit (/q)")
 		return nil
 	case "explore":
 		m.v = viewExplore
@@ -1430,6 +1465,33 @@ func (m *Model) execCommand(cmd *Command) tea.Cmd {
 			return nil
 		}
 		return m.cmdJoinByName(cmd.Args[0])
+	case "leave":
+		if len(cmd.Args) != 1 {
+			m.flashErr("Usage: /leave community")
+			return nil
+		}
+		target := cmd.Args[0]
+		var found *store.Community
+		for i := range m.joined {
+			if strings.EqualFold(m.joined[i].Name, target) {
+				found = &m.joined[i]
+				break
+			}
+		}
+		if found == nil {
+			m.flashErr("Not a member of that community.")
+			return nil
+		}
+		m.leaveConfirm = true
+		m.leaveCommunityID = found.ID
+		m.leaveCommunity = found.Name
+		m.flashErr(fmt.Sprintf("Leave %s? (y/n)", found.Name))
+		return nil
+	case "quit", "q":
+		if m.cancel != nil {
+			m.cancel()
+		}
+		return tea.Quit
 	default:
 		m.flashErr("Unknown command. Type /help for available commands.")
 		return nil
@@ -2235,6 +2297,10 @@ type joinedCommunityMsg struct {
 	err       error
 }
 
+type leftCommunityMsg struct {
+	err error
+}
+
 func (m Model) cmdJoinByName(name string) tea.Cmd {
 	userID := ""
 	if m.user != nil {
@@ -2254,6 +2320,19 @@ func (m Model) cmdJoinByName(name string) tea.Cmd {
 			return joinedCommunityMsg{err: err}
 		}
 		return joinedCommunityMsg{community: c}
+	}
+}
+
+func (m Model) cmdLeaveCommunity(communityID string) tea.Cmd {
+	userID := ""
+	if m.user != nil {
+		userID = m.user.ID
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		err := m.st.LeaveCommunity(ctx, userID, communityID)
+		return leftCommunityMsg{err: err}
 	}
 }
 

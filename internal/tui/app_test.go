@@ -50,6 +50,16 @@ func (f *fakeStore) GetCommunityByID(ctx context.Context, id string) (*store.Com
 	return nil, nil
 }
 func (f *fakeStore) JoinCommunity(ctx context.Context, userID, communityID string) error { return nil }
+func (f *fakeStore) LeaveCommunity(ctx context.Context, userID, communityID string) error {
+	out := f.joined[:0]
+	for _, c := range f.joined {
+		if c.ID != communityID {
+			out = append(out, c)
+		}
+	}
+	f.joined = out
+	return nil
+}
 func (f *fakeStore) ListExploreCommunities(ctx context.Context, userID string, limit int) ([]store.Community, error) {
 	return f.explore, nil
 }
@@ -272,10 +282,9 @@ func applyCmd(t *testing.T, model tea.Model, cmd tea.Cmd) tea.Model {
 	msg := cmd()
 	switch msg := msg.(type) {
 	case tea.BatchMsg:
-		for _, m := range msg {
-			updated, next := model.Update(m)
-			model = updated.(tea.Model)
-			model = applyCmd(t, model, next)
+		// In Bubble Tea, BatchMsg contains a list of Cmds to be executed.
+		for _, c := range msg {
+			model = applyCmd(t, model, c)
 		}
 		return model
 	case nil:
@@ -335,6 +344,65 @@ func TestRoomFeedPaginationLoadsMoreAtBottom(t *testing.T) {
 	}
 	if m.feed[2].ID != "m1" {
 		t.Fatalf("expected last item m1, got %q", m.feed[2].ID)
+	}
+}
+
+func TestLeaveCommandPromptsAndLeavesOnYes(t *testing.T) {
+	fs := &fakeStore{
+		joined: []store.Community{{ID: "c1", Name: "rust"}},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = model.(Model)
+	model = applyCmd(t, m, m.cmdLoadJoined())
+	m = model.(Model)
+	m.v = viewHome
+	m.focus = focusMain
+	m.mainFocus = mainInput
+	m.input.Focus()
+	m.input.SetValue("/leave rust")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("expected no cmd on prompt")
+	}
+	if !m.leaveConfirm {
+		t.Fatalf("expected leaveConfirm")
+	}
+	if m.leaveCommunityID != "c1" {
+		t.Fatalf("expected leaveCommunityID=c1, got %q", m.leaveCommunityID)
+	}
+
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected leave cmd")
+	}
+	model = applyCmd(t, m, cmd)
+	m = model.(Model)
+	if len(fs.joined) != 0 {
+		t.Fatalf("expected store joined empty after leave, got %d", len(fs.joined))
+	}
+	if len(m.joined) != 0 {
+		t.Fatalf("expected joined empty after leave, got %d", len(m.joined))
+	}
+	if m.v != viewHome {
+		t.Fatalf("expected viewHome after leave")
+	}
+}
+
+func TestQuitCommandReturnsQuitMsg(t *testing.T) {
+	fs := &fakeStore{}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	cmd := m.execCommand(ParseCommand("/q"))
+	if cmd == nil {
+		t.Fatalf("expected cmd")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("expected QuitMsg")
 	}
 }
 
