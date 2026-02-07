@@ -145,6 +145,7 @@ type Model struct {
 	searchLoading bool
 	searchErr     string
 	searchMatchID string
+	searchTrunc   bool
 
 	createStep  createCommunityStep
 	pendingName string
@@ -275,7 +276,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.searchLoading = false
 			return m, nil
 		}
-		m.searchResults = msg.results
+		m.searchTrunc = len(msg.results) > 50
+		if m.searchTrunc {
+			m.searchResults = msg.results[:50]
+		} else {
+			m.searchResults = msg.results
+		}
 		m.searchSel = clampIndex(m.searchSel, len(m.searchResults))
 		m.searchLoading = false
 		m.searchErr = ""
@@ -1034,11 +1040,25 @@ func (m *Model) flashErr(s string) {
 }
 
 func renderHighlightMarkers(s string) string {
-	// Store marks highlights with <hl>...</hl>. The current TUI doesn't do rich text,
-	// so we make highlights obvious using brackets.
-	s = strings.ReplaceAll(s, "<hl>", "[")
-	s = strings.ReplaceAll(s, "</hl>", "]")
-	return s
+	hl := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	var b strings.Builder
+	for {
+		i := strings.Index(s, "<hl>")
+		if i < 0 {
+			b.WriteString(s)
+			break
+		}
+		b.WriteString(s[:i])
+		s = s[i+len("<hl>"):]
+		j := strings.Index(s, "</hl>")
+		if j < 0 {
+			b.WriteString(s)
+			break
+		}
+		b.WriteString(hl.Render(s[:j]))
+		s = s[j+len("</hl>"):]
+	}
+	return b.String()
 }
 
 func (m Model) header() string {
@@ -1317,6 +1337,9 @@ func (m Model) viewSearch() string {
 		b.WriteString(wrap(renderHighlightMarkers(content), max(20, mw-6)))
 		b.WriteString(fmt.Sprintf("\n(%d↑ %d💬)\n\n", it.Upvotes, it.Replies))
 	}
+	if m.searchTrunc {
+		b.WriteString("Showing first 50 results. Narrow your search.\n")
+	}
 	b.WriteString("Nav: up/down select, Enter open thread, Esc close search.\n")
 	return b.String()
 }
@@ -1418,6 +1441,7 @@ func (m *Model) openSearch(initialQuery string) {
 	m.searchErr = ""
 	m.searchResults = nil
 	m.searchSel = 0
+	m.searchTrunc = false
 	m.searchQuery = strings.TrimSpace(initialQuery)
 	m.searchInput.SetValue(m.searchQuery)
 	m.searchInput.Focus()
@@ -1552,7 +1576,7 @@ func (m Model) cmdSearch(q string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		results, err := m.st.SearchMessages(ctx, userID, q, 50)
+		results, err := m.st.SearchMessages(ctx, userID, q, 51)
 		return searchLoadedMsg{results: results, err: err}
 	}
 }

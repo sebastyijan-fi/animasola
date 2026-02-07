@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -484,5 +485,38 @@ func TestSearchEnterOpensThreadAndEscRestoresSearch(t *testing.T) {
 	m = model.(Model)
 	if !m.searchOpen || m.mainFocus != mainSearch {
 		t.Fatalf("expected search restored after esc, got open=%v focus=%v", m.searchOpen, m.mainFocus)
+	}
+}
+
+func TestSearchShowsTruncationHintWhenMoreThan50Results(t *testing.T) {
+	var results []store.SearchResult
+	for i := 0; i < 51; i++ {
+		results = append(results, store.SearchResult{
+			FeedMessage: store.FeedMessage{
+				Message:        store.Message{ID: "m" + string(rune('a'+(i%26))), RoomID: "r1"},
+				AuthorUsername: "a",
+				CommunityID:    "c1",
+				CommunityName:  "rust",
+				RoomName:       "general",
+			},
+			HighlightedContent: "<hl>tokio</hl>",
+		})
+	}
+	fs := &fakeStore{
+		search: results,
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	m.openSearch("tokio")
+	model := applyCmd(t, m, m.cmdSearch("tokio"))
+	m = model.(Model)
+	if len(m.searchResults) != 50 {
+		t.Fatalf("expected 50 results, got %d", len(m.searchResults))
+	}
+	if !m.searchTrunc {
+		t.Fatalf("expected searchTrunc true")
+	}
+	if !strings.Contains(m.viewSearch(), "Showing first 50 results") {
+		t.Fatalf("expected truncation hint in view")
 	}
 }
