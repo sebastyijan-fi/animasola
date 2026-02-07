@@ -162,6 +162,47 @@ func TestTriggers_MemberCount(t *testing.T) {
 	}
 }
 
+func TestListCommunityMembers_ReturnsSortedUsernames(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "members.db")
+
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	if err := st.Migrate(filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	u1, err := st.CreateUser(ctx, "seba", "fp1", "ssh-ed25519 AAAA...")
+	if err != nil {
+		t.Fatalf("CreateUser u1: %v", err)
+	}
+	u2, err := st.CreateUser(ctx, "kai", "fp2", "ssh-ed25519 AAAA...")
+	if err != nil {
+		t.Fatalf("CreateUser u2: %v", err)
+	}
+	c, _, err := st.CreateCommunity(ctx, u1.ID, "rust", "All things Rust")
+	if err != nil {
+		t.Fatalf("CreateCommunity: %v", err)
+	}
+	if err := st.JoinCommunity(ctx, u2.ID, c.ID); err != nil {
+		t.Fatalf("JoinCommunity: %v", err)
+	}
+
+	members, err := st.ListCommunityMembers(ctx, c.ID, 10)
+	if err != nil {
+		t.Fatalf("ListCommunityMembers: %v", err)
+	}
+	if strings.Join(members, ",") != "kai,seba" {
+		t.Fatalf("unexpected members: %#v", members)
+	}
+}
+
 func TestTriggers_UpvotesAndRepliesAndFTS(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "trg2.db")

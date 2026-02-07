@@ -27,6 +27,7 @@ const (
 	viewRoom
 	viewThread
 	viewProfile
+	viewMembers
 )
 
 type focus int
@@ -131,6 +132,9 @@ type Model struct {
 
 	profile    *store.UserProfile
 	profileSel int
+
+	members    []string
+	membersSel int
 
 	replyToID       *string
 	replyToUsername string
@@ -359,6 +363,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.profile = msg.profile
 		m.profileSel = clampIndex(m.profileSel, len(m.profile.TopPosts))
+		return m, nil
+	case membersLoadedMsg:
+		if msg.err != nil {
+			m.flashErr("Something went wrong. Try again.")
+			return m, nil
+		}
+		// If user navigated away from this community while loading, ignore.
+		if m.curCommunity != nil && m.curCommunity.ID != msg.communityID {
+			return m, nil
+		}
+		m.members = msg.members
+		m.membersSel = clampIndex(m.membersSel, len(m.members))
 		return m, nil
 	case roomsLoadedMsg:
 		if msg.err != nil {
@@ -1072,6 +1088,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.push(nav{v: viewProfile})
 				return m, tea.Batch(m.cmdLoadRoomContext(it.CommunityID, it.RoomID), m.cmdLoadThread(it.ID))
 			}
+		case viewMembers:
+			switch km.String() {
+			case "up":
+				if m.membersSel > 0 {
+					m.membersSel--
+				}
+				return m, nil
+			case "down":
+				if m.membersSel < len(m.members)-1 {
+					m.membersSel++
+				}
+				return m, nil
+			case "enter":
+				if m.mainFocus != mainNav {
+					goto input
+				}
+				if m.membersSel < 0 || m.membersSel >= len(m.members) {
+					return m, nil
+				}
+				u := m.members[m.membersSel]
+				prev := m.v
+				m.v = viewProfile
+				m.profile = nil
+				m.profileSel = 0
+				m.push(nav{v: prev})
+				return m, m.cmdLoadProfile(u)
+			}
 		}
 	}
 
@@ -1154,6 +1197,8 @@ func (m Model) View() string {
 			b.WriteString(m.viewThread())
 		case viewProfile:
 			b.WriteString(m.viewProfile())
+		case viewMembers:
+			b.WriteString(m.viewMembers())
 		}
 	}
 
@@ -1362,6 +1407,12 @@ func (m Model) header() string {
 			loc = fmt.Sprintf("@%s", m.profile.Username)
 		} else {
 			loc = "profile"
+		}
+	case viewMembers:
+		if m.curCommunity != nil {
+			loc = fmt.Sprintf("%s · members", m.curCommunity.Name)
+		} else {
+			loc = "members"
 		}
 	}
 
@@ -1658,6 +1709,27 @@ func (m Model) viewProfile() string {
 	return b.String()
 }
 
+func (m Model) viewMembers() string {
+	if m.curCommunity == nil {
+		return "No community selected.\n"
+	}
+	var b strings.Builder
+	b.WriteString("Members\n\n")
+	if len(m.members) == 0 {
+		b.WriteString("(none)\n")
+		return b.String()
+	}
+	for i, u := range m.members {
+		prefix := "  "
+		if i == m.membersSel {
+			prefix = "> "
+		}
+		b.WriteString(prefix + u + "\n")
+	}
+	b.WriteString("\nEnter opens profile. Esc goes back.\n")
+	return b.String()
+}
+
 func (m *Model) handleEnter() tea.Cmd {
 	line := strings.TrimSpace(m.input.Value())
 	if line == "" {
@@ -1775,6 +1847,20 @@ func (m *Model) execCommand(cmd *Command) tea.Cmd {
 		m.mainFocus = mainNav
 		m.input.Blur()
 		return m.cmdLoadRooms(m.curCommunity.ID)
+	case "members":
+		if m.curCommunity == nil {
+			m.flashErr("No community selected.")
+			return nil
+		}
+		prev := m.v
+		m.v = viewMembers
+		m.members = nil
+		m.membersSel = 0
+		m.push(nav{v: prev})
+		m.focus = focusMain
+		m.mainFocus = mainNav
+		m.input.Blur()
+		return m.cmdLoadMembers(m.curCommunity.ID)
 	case "create-room":
 		if len(cmd.Args) != 1 {
 			m.flashErr("Usage: /create-room name")
@@ -2464,6 +2550,21 @@ func (m Model) cmdLoadRooms(communityID string) tea.Cmd {
 		defer cancel()
 		rs, err := m.st.ListRoomsByCommunity(ctx, communityID)
 		return roomsLoadedMsg{rooms: rs, err: err}
+	}
+}
+
+type membersLoadedMsg struct {
+	communityID string
+	members     []string
+	err         error
+}
+
+func (m Model) cmdLoadMembers(communityID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		ms, err := m.st.ListCommunityMembers(ctx, communityID, 100)
+		return membersLoadedMsg{communityID: communityID, members: ms, err: err}
 	}
 }
 

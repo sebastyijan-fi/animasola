@@ -92,6 +92,10 @@ func (s *storeWithEvents) CountRoomsByCommunity(ctx context.Context, communityID
 	return s.st.CountRoomsByCommunity(ctx, communityID)
 }
 
+func (s *storeWithEvents) ListCommunityMembers(ctx context.Context, communityID string, limit int) ([]string, error) {
+	return s.st.ListCommunityMembers(ctx, communityID, limit)
+}
+
 func (s *storeWithEvents) GetRoomByID(ctx context.Context, id string) (*store.Room, error) {
 	return s.st.GetRoomByID(ctx, id)
 }

@@ -25,6 +25,8 @@ type fakeStore struct {
 	roomsByID map[string]store.Room
 
 	profiles map[string]*store.UserProfile
+
+	members map[string][]string
 }
 
 func (f *fakeStore) CreateCommunity(ctx context.Context, createdByUserID, name, description string) (*store.Community, *store.Room, error) {
@@ -114,6 +116,16 @@ func (f *fakeStore) CreateRoom(ctx context.Context, communityID, name string) (*
 	f.rooms[communityID] = append(f.rooms[communityID], r)
 	rr := r
 	return &rr, nil
+}
+func (f *fakeStore) ListCommunityMembers(ctx context.Context, communityID string, limit int) ([]string, error) {
+	if f.members == nil {
+		return nil, nil
+	}
+	m := f.members[communityID]
+	if len(m) > limit {
+		m = m[:limit]
+	}
+	return append([]string(nil), m...), nil
 }
 func (f *fakeStore) GetRoomByID(ctx context.Context, id string) (*store.Room, error) {
 	if f.roomsByID != nil {
@@ -641,6 +653,55 @@ func TestUserCommandLoadsProfileView(t *testing.T) {
 	}
 	if m.profile == nil || m.profile.Username != "kai" {
 		t.Fatalf("expected kai profile loaded")
+	}
+}
+
+func TestMembersCommandLoadsMembersViewAndEnterOpensProfile(t *testing.T) {
+	fs := &fakeStore{
+		members: map[string][]string{
+			"c1": {"kai", "seba"},
+		},
+		profiles: map[string]*store.UserProfile{
+			"kai": {UserID: "u2", Username: "kai", CreatedAt: time.Now().UTC()},
+		},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	m.curCommunity = &store.Community{ID: "c1", Name: "rust"}
+	m.v = viewRoom
+	m.focus = focusMain
+	m.mainFocus = mainInput
+	m.input.Focus()
+	m.input.SetValue("/members")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected cmd")
+	}
+	model := applyCmd(t, m, cmd)
+	m = model.(Model)
+	if m.v != viewMembers {
+		t.Fatalf("expected viewMembers")
+	}
+	if len(m.members) != 2 {
+		t.Fatalf("expected 2 members, got %d", len(m.members))
+	}
+
+	// Select first member (already 0) and open.
+	m.mainFocus = mainNav
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected profile load cmd")
+	}
+	model = applyCmd(t, m, cmd)
+	m = model.(Model)
+	if m.v != viewProfile {
+		t.Fatalf("expected viewProfile")
+	}
+	if m.profile == nil || m.profile.Username != "kai" {
+		t.Fatalf("expected kai profile")
 	}
 }
 

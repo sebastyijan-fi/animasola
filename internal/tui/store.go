@@ -27,6 +27,7 @@ type Store interface {
 	CreateRoom(ctx context.Context, communityID, name string) (*store.Room, error)
 	ListRoomsByCommunity(ctx context.Context, communityID string) ([]store.Room, error)
 	CountRoomsByCommunity(ctx context.Context, communityID string) (int, error)
+	ListCommunityMembers(ctx context.Context, communityID string, limit int) ([]string, error)
 	GetRoomByID(ctx context.Context, id string) (*store.Room, error)
 	UpsertReadPosition(ctx context.Context, userID, roomID, lastReadMessageID string) error
 	UnreadCountsByCommunity(ctx context.Context, userID string) ([]store.CommunityUnread, error)
