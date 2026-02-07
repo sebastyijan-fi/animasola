@@ -626,6 +626,37 @@ func TestMouseClickHomeHeaderCyclesSort(t *testing.T) {
 	}
 }
 
+func TestMouseWheelOnSidebarMovesSelectionWithoutFocus(t *testing.T) {
+	fs := &fakeStore{
+		joined: []store.Community{
+			{ID: "c1", Name: "rust"},
+			{ID: "c2", Name: "linux"},
+			{ID: "c3", Name: "privacy"},
+			{ID: "c4", Name: "go"},
+		},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = model.(Model)
+	model = applyCmd(t, m, m.cmdLoadJoined())
+	m = model.(Model)
+
+	// Ensure we're not already focused on sidebar.
+	m.focus = focusMain
+	m.mainFocus = mainNav
+	m.sidebar.Selected = 0
+
+	model, _ = m.Update(tea.MouseMsg{X: 0, Y: 3, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
+	m = model.(Model)
+	if m.sidebar.Selected == 0 {
+		t.Fatalf("expected sidebar selection to move on wheel")
+	}
+	if m.focus != focusSidebar {
+		t.Fatalf("expected focusSidebar after wheel")
+	}
+}
+
 func TestMouseClickHomeHeaderCyclesTopRangeWhenTop(t *testing.T) {
 	fs := &fakeStore{
 		joined: []store.Community{{ID: "c1", Name: "rust"}},

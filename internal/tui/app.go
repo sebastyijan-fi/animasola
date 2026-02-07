@@ -1498,16 +1498,18 @@ func (m Model) handleMouse(mm tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.sidebarVisible() && mm.X < components.SidebarWidth {
 		switch mm.Button {
 		case tea.MouseButtonWheelUp:
-			if m.focus == focusSidebar {
-				m.sidebar.Selected = max(0, m.sidebar.Selected-3)
-				m.joinedSel = m.sidebar.Selected
-			}
+			m.focus = focusSidebar
+			m.mainFocus = mainNav
+			m.input.Blur()
+			m.sidebar.Selected = max(0, m.sidebar.Selected-3)
+			m.joinedSel = m.sidebar.Selected
 			return m, nil
 		case tea.MouseButtonWheelDown:
-			if m.focus == focusSidebar {
-				m.sidebar.Selected = min(len(m.joined)-1, m.sidebar.Selected+3)
-				m.joinedSel = m.sidebar.Selected
-			}
+			m.focus = focusSidebar
+			m.mainFocus = mainNav
+			m.input.Blur()
+			m.sidebar.Selected = min(len(m.joined)-1, m.sidebar.Selected+3)
+			m.joinedSel = m.sidebar.Selected
 			return m, nil
 		case tea.MouseButtonLeft:
 			// Items start at y=2 (header + blank).
