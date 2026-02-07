@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"testing"
+	"time"
 
 	"animasola/internal/store"
 
@@ -64,6 +65,35 @@ func (f *fakeStore) UnreadCountsByCommunity(ctx context.Context, userID string) 
 }
 func (f *fakeStore) ListRoomTopLevelNew(ctx context.Context, roomID string, limit int, beforeID *string) ([]store.FeedMessage, error) {
 	return f.feed[roomID], nil
+}
+func (f *fakeStore) ListRoomTopLevelNewPage(ctx context.Context, roomID string, limit int, beforeID *string) ([]store.FeedMessage, *string, error) {
+	items := f.feed[roomID]
+	start := 0
+	if beforeID != nil {
+		for i := range items {
+			if items[i].ID == *beforeID {
+				start = i + 1
+				break
+			}
+		}
+	}
+	end := start + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	out := append([]store.FeedMessage(nil), items[start:end]...)
+	var next *string
+	if len(out) == limit {
+		id := out[len(out)-1].ID
+		next = &id
+	}
+	return out, next, nil
+}
+func (f *fakeStore) ListRoomTopLevelTopPage(ctx context.Context, roomID string, topRange store.TopRange, limit int, before *store.RoomTopCursor) ([]store.FeedMessage, *store.RoomTopCursor, error) {
+	return nil, nil, nil
+}
+func (f *fakeStore) ListRoomTopLevelHotPage(ctx context.Context, roomID string, now time.Time, limit int, before *store.RoomHotCursor) ([]store.FeedMessage, *store.RoomHotCursor, error) {
+	return nil, nil, nil
 }
 func (f *fakeStore) ListThread(ctx context.Context, rootMessageID string) ([]store.FeedMessage, error) {
 	return nil, nil
@@ -202,5 +232,56 @@ func applyCmd(t *testing.T, model tea.Model, cmd tea.Cmd) tea.Model {
 		updated, next := model.Update(msg)
 		model = updated.(tea.Model)
 		return applyCmd(t, model, next)
+	}
+}
+
+func TestRoomFeedPaginationLoadsMoreAtBottom(t *testing.T) {
+	fs := &fakeStore{
+		feed: map[string][]store.FeedMessage{
+			"r1": {
+				{Message: store.Message{ID: "m3"}, AuthorUsername: "a"},
+				{Message: store.Message{ID: "m2"}, AuthorUsername: "a"},
+				{Message: store.Message{ID: "m1"}, AuthorUsername: "a"},
+			},
+		},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	m.v = viewRoom
+	m.curRoom = &store.Room{ID: "r1", Name: "general"}
+	m.feedSort = store.SortNew
+	m.focus = focusMain
+	m.mainFocus = mainNav
+
+	// Initial load.
+	m.feedLoading = true
+	model := applyCmd(t, m, m.cmdLoadFeedReset())
+	m = model.(Model)
+	if len(m.feed) != 3 {
+		t.Fatalf("expected initial feed loaded, got %d", len(m.feed))
+	}
+
+	// Force a small page size by pretending we have more and a cursor.
+	// Our fake store uses the whole slice but honors `beforeID` by position.
+	// Make first "page" end at m2 so "more" appends m1.
+	m.feed = m.feed[:2]
+	m.feedSel = len(m.feed) - 1
+	cur := m.feed[len(m.feed)-1].ID
+	m.feedNewCur = &cur
+	m.feedHasMore = true
+	m.feedLoading = false
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected load more cmd at bottom")
+	}
+	model = applyCmd(t, m, cmd)
+	m = model.(Model)
+	if len(m.feed) != 3 {
+		t.Fatalf("expected feed appended, got %d", len(m.feed))
+	}
+	if m.feed[2].ID != "m1" {
+		t.Fatalf("expected last item m1, got %q", m.feed[2].ID)
 	}
 }

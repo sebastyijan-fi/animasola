@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"time"
 
 	"animasola/internal/store"
 )
@@ -21,6 +22,9 @@ type Store interface {
 	UpsertReadPosition(ctx context.Context, userID, roomID, lastReadMessageID string) error
 	UnreadCountsByCommunity(ctx context.Context, userID string) ([]store.CommunityUnread, error)
 	ListRoomTopLevelNew(ctx context.Context, roomID string, limit int, beforeID *string) ([]store.FeedMessage, error)
+	ListRoomTopLevelNewPage(ctx context.Context, roomID string, limit int, beforeID *string) ([]store.FeedMessage, *string, error)
+	ListRoomTopLevelTopPage(ctx context.Context, roomID string, topRange store.TopRange, limit int, before *store.RoomTopCursor) ([]store.FeedMessage, *store.RoomTopCursor, error)
+	ListRoomTopLevelHotPage(ctx context.Context, roomID string, now time.Time, limit int, before *store.RoomHotCursor) ([]store.FeedMessage, *store.RoomHotCursor, error)
 	ListThread(ctx context.Context, rootMessageID string) ([]store.FeedMessage, error)
 	CreateMessage(ctx context.Context, roomID, authorID, content string, parentID *string) (*store.Message, error)
 	ToggleUpvote(ctx context.Context, userID, messageID string) (*store.UpvoteState, error)

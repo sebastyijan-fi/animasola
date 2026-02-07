@@ -94,6 +94,15 @@ type Model struct {
 	curRoom      *store.Room
 	feed         []store.FeedMessage
 	feedSel      int
+	feedSort     store.SortMode
+	feedTopRange store.TopRange
+	feedNewCur   *string
+	feedTopCur   *store.RoomTopCursor
+	feedHotCur   *store.RoomHotCursor
+	feedHasMore  bool
+	feedLoading  bool
+	feedSpinIdx  int
+	feedPending  int
 
 	unreadByCommunity map[string]int
 
@@ -126,6 +135,10 @@ type Model struct {
 	errMsg   string
 	errUntil time.Time
 }
+
+type feedSpinTickMsg struct{}
+
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 type threadItem struct {
 	msg         store.FeedMessage
@@ -161,6 +174,8 @@ func NewApp(appName string, st Store, broker *pubsub.Broker[pubsub.Event], user 
 		input:             ti,
 		homeSort:          store.SortHot,
 		homeTopRange:      store.TopWeek,
+		feedSort:          store.SortHot,
+		feedTopRange:      store.TopWeek,
 		unreadByCommunity: make(map[string]int),
 	}
 	if broker != nil {
@@ -173,9 +188,22 @@ func NewApp(appName string, st Store, broker *pubsub.Broker[pubsub.Event], user 
 
 func (m Model) Init() tea.Cmd {
 	if m.events != nil {
-		return tea.Batch(m.cmdLoadJoined(), m.cmdLoadUnread(), m.cmdLoadHomeReset(), textinput.Blink, waitForEvent(m.events))
+		return tea.Batch(
+			m.cmdLoadJoined(),
+			m.cmdLoadUnread(),
+			m.cmdLoadHomeReset(),
+			textinput.Blink,
+			waitForEvent(m.events),
+			tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg { return feedSpinTickMsg{} }),
+		)
 	}
-	return tea.Batch(m.cmdLoadJoined(), m.cmdLoadUnread(), m.cmdLoadHomeReset(), textinput.Blink)
+	return tea.Batch(
+		m.cmdLoadJoined(),
+		m.cmdLoadUnread(),
+		m.cmdLoadHomeReset(),
+		textinput.Blink,
+		tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg { return feedSpinTickMsg{} }),
+	)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -186,6 +214,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.Width = max(10, m.mainWidth()-2)
 		m.rebuildSidebarItems()
 		return m, nil
+	}
+
+	// spinner tick
+	if _, ok := msg.(feedSpinTickMsg); ok {
+		if m.feedLoading {
+			m.feedSpinIdx = (m.feedSpinIdx + 1) % len(spinnerFrames)
+		}
+		return m, tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg { return feedSpinTickMsg{} })
 	}
 
 	// async results
@@ -246,22 +282,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.room != nil {
 			m.curRoom = msg.room
 			m.v = viewRoom
+			m.feedSort = store.SortHot
+			m.feedTopRange = store.TopWeek
+			m.feedNewCur = nil
+			m.feedTopCur = nil
+			m.feedHotCur = nil
+			m.feedHasMore = false
+			m.feedLoading = true
+			m.feedSpinIdx = 0
+			m.feedPending = 0
 			m.focus = focusMain
 			m.mainFocus = mainInput
 			m.input.Focus()
-			return m, tea.Batch(m.cmdLoadFeed(), m.cmdLoadUnread())
+			return m, tea.Batch(m.cmdLoadFeedReset(), m.cmdLoadUnread())
 		}
 		m.v = viewCommunity
 		return m, m.cmdLoadUnread()
 	case feedLoadedMsg:
 		if msg.err != nil {
 			m.flashErr("Something went wrong. Try again.")
+			m.feedLoading = false
 			return m, nil
 		}
-		m.feed = msg.items
+		if msg.append {
+			m.feed = append(m.feed, msg.items...)
+		} else {
+			m.feed = msg.items
+			m.feedSel = 0
+			m.feedPending = 0
+		}
 		if m.feedSel >= len(m.feed) {
 			m.feedSel = max(0, len(m.feed)-1)
 		}
+		m.feedNewCur = msg.nextNew
+		m.feedTopCur = msg.nextTop
+		m.feedHotCur = msg.nextHot
+		m.feedHasMore = msg.hasMore
+		m.feedLoading = false
 		if m.v == viewRoom && m.curRoom != nil && len(m.feed) > 0 {
 			id := newestMessageID(m.feed)
 			return m, tea.Batch(m.cmdMarkRead(m.curRoom.ID, id), m.cmdLoadUnread())
@@ -329,7 +386,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.replyToID = nil
 		m.replyToUsername = ""
 		m.input.Placeholder = "/help"
-		return m, m.cmdLoadFeed()
+		m.feedLoading = true
+		return m, m.cmdLoadFeedReset()
 	case upvoteToggledMsg:
 		if msg.err != nil {
 			m.flashErr("Something went wrong. Try again.")
@@ -352,7 +410,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case viewThread:
 			return m, m.cmdLoadThread(m.threadRootID)
 		case viewRoom:
-			return m, m.cmdLoadFeed()
+			m.feedLoading = true
+			return m, m.cmdLoadFeedReset()
 		default:
 			return m, nil
 		}
@@ -373,8 +432,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Batch(m.cmdLoadUnread(), waitForEvent(m.events))
 		case viewRoom:
-			if m.curRoom != nil && em.evt.RoomID == m.curRoom.ID {
-				return m, tea.Batch(m.cmdLoadFeed(), m.cmdLoadUnread(), waitForEvent(m.events))
+			if m.curRoom != nil && em.evt.RoomID == m.curRoom.ID && em.evt.Type == pubsub.EventNewMessage {
+				if m.feedSort == store.SortNew {
+					return m, tea.Batch(m.cmdLoadFeedReset(), m.cmdLoadUnread(), waitForEvent(m.events))
+				}
+				m.feedPending++
 			}
 		case viewThread:
 			if m.curRoom != nil && em.evt.RoomID == m.curRoom.ID {
@@ -543,11 +605,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cycleHomeSort()
 					return m, m.cmdLoadHomeReset()
 				}
+				if m.v == viewRoom {
+					m.cycleFeedSort()
+					m.feedLoading = true
+					return m, m.cmdLoadFeedReset()
+				}
 				return m, nil
 			case "t":
 				if m.v == viewHome && m.homeSort == store.SortTop {
 					m.cycleHomeTopRange()
 					return m, m.cmdLoadHomeReset()
+				}
+				if m.v == viewRoom && m.feedSort == store.SortTop {
+					m.cycleFeedTopRange()
+					m.feedLoading = true
+					return m, m.cmdLoadFeedReset()
 				}
 				return m, nil
 			}
@@ -659,8 +731,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				r := m.rooms[m.roomSel]
 				m.curRoom = &r
 				m.v = viewRoom
+				m.feedSort = store.SortHot
+				m.feedTopRange = store.TopWeek
+				m.feedNewCur = nil
+				m.feedTopCur = nil
+				m.feedHotCur = nil
+				m.feedHasMore = false
+				m.feedLoading = true
+				m.feedSpinIdx = 0
+				m.feedPending = 0
 				m.push(nav{v: viewCommunity, communityID: m.curCommunity.ID, roomSel: m.roomSel})
-				return m, m.cmdLoadFeed()
+				return m, m.cmdLoadFeedReset()
 			}
 		case viewRoom:
 			switch km.String() {
@@ -672,6 +753,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "down":
 				if m.feedSel < len(m.feed)-1 {
 					m.feedSel++
+					if m.feedSel >= len(m.feed)-1 && m.feedHasMore && !m.feedLoading {
+						m.feedLoading = true
+						return m, m.cmdLoadFeedMore()
+					}
+					return m, nil
+				}
+				if m.feedHasMore && !m.feedLoading {
+					m.feedLoading = true
+					return m, m.cmdLoadFeedMore()
 				}
 				return m, nil
 			case "enter":
@@ -928,8 +1018,21 @@ func (m Model) viewRoom() string {
 	}
 	mw := m.mainWidth()
 	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Room · %s", m.feedSort))
+	if m.feedSort == store.SortTop {
+		b.WriteString(fmt.Sprintf(" · %s", m.feedTopRange))
+	}
+	b.WriteString("\n\n")
+	if m.feedPending > 0 && m.feedSort != store.SortNew {
+		b.WriteString(fmt.Sprintf("%d new posts  (new sort auto-refreshes)\n\n", m.feedPending))
+	}
 	if len(m.feed) == 0 {
-		b.WriteString("(no messages)\n")
+		if m.feedLoading {
+			b.WriteString(spinnerFrames[m.feedSpinIdx%len(spinnerFrames)])
+			b.WriteString("\n")
+		} else {
+			b.WriteString("(no messages)\n")
+		}
 		return b.String()
 	}
 	for i, it := range m.feed {
@@ -949,7 +1052,11 @@ func (m Model) viewRoom() string {
 		b.WriteString(wrap(content, max(20, mw-6)))
 		b.WriteString("\n\n")
 	}
-	b.WriteString("Nav: up/down select, Enter thread, r reply, u upvote, d delete, Esc back. Tab toggles input/nav.\n")
+	if m.feedLoading {
+		b.WriteString(spinnerFrames[m.feedSpinIdx%len(spinnerFrames)])
+		b.WriteString("\n")
+	}
+	b.WriteString("Nav: up/down select, Enter thread, r reply, u upvote, d delete, Esc back. s cycle sort, t cycle top range. Tab toggles input/nav.\n")
 	return b.String()
 }
 
@@ -1096,7 +1203,8 @@ func (m *Model) pop() (tea.Model, tea.Cmd) {
 		m.replyToID = nil
 		m.replyToUsername = ""
 		m.input.Placeholder = "/help"
-		return *m, m.cmdLoadFeed()
+		m.feedLoading = true
+		return *m, m.cmdLoadFeedReset()
 	case viewHome:
 		m.replyToID = nil
 		m.replyToUsername = ""
@@ -1271,20 +1379,69 @@ func (m Model) cmdOpenCommunityDefault(communityID string) tea.Cmd {
 }
 
 type feedLoadedMsg struct {
-	items []store.FeedMessage
-	err   error
+	items   []store.FeedMessage
+	append  bool
+	hasMore bool
+	nextNew *string
+	nextTop *store.RoomTopCursor
+	nextHot *store.RoomHotCursor
+	err     error
 }
 
-func (m Model) cmdLoadFeed() tea.Cmd {
+func (m Model) cmdLoadFeedReset() tea.Cmd {
 	if m.curRoom == nil {
 		return nil
 	}
 	roomID := m.curRoom.ID
+	sortMode := m.feedSort
+	topRange := m.feedTopRange
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		items, err := m.st.ListRoomTopLevelNew(ctx, roomID, 30, nil)
-		return feedLoadedMsg{items: items, err: err}
+		switch sortMode {
+		case store.SortNew:
+			items, next, err := m.st.ListRoomTopLevelNewPage(ctx, roomID, 30, nil)
+			return feedLoadedMsg{items: items, append: false, hasMore: next != nil, nextNew: next, err: err}
+		case store.SortTop:
+			items, next, err := m.st.ListRoomTopLevelTopPage(ctx, roomID, topRange, 30, nil)
+			return feedLoadedMsg{items: items, append: false, hasMore: next != nil, nextTop: next, err: err}
+		case store.SortHot:
+			items, next, err := m.st.ListRoomTopLevelHotPage(ctx, roomID, time.Now().UTC(), 30, nil)
+			return feedLoadedMsg{items: items, append: false, hasMore: next != nil, nextHot: next, err: err}
+		default:
+			items, next, err := m.st.ListRoomTopLevelNewPage(ctx, roomID, 30, nil)
+			return feedLoadedMsg{items: items, append: false, hasMore: next != nil, nextNew: next, err: err}
+		}
+	}
+}
+
+func (m Model) cmdLoadFeedMore() tea.Cmd {
+	if m.curRoom == nil || !m.feedHasMore {
+		return nil
+	}
+	roomID := m.curRoom.ID
+	sortMode := m.feedSort
+	topRange := m.feedTopRange
+	beforeNew := m.feedNewCur
+	beforeTop := m.feedTopCur
+	beforeHot := m.feedHotCur
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		switch sortMode {
+		case store.SortNew:
+			items, next, err := m.st.ListRoomTopLevelNewPage(ctx, roomID, 30, beforeNew)
+			return feedLoadedMsg{items: items, append: true, hasMore: next != nil, nextNew: next, err: err}
+		case store.SortTop:
+			items, next, err := m.st.ListRoomTopLevelTopPage(ctx, roomID, topRange, 30, beforeTop)
+			return feedLoadedMsg{items: items, append: true, hasMore: next != nil, nextTop: next, err: err}
+		case store.SortHot:
+			items, next, err := m.st.ListRoomTopLevelHotPage(ctx, roomID, time.Now().UTC(), 30, beforeHot)
+			return feedLoadedMsg{items: items, append: true, hasMore: next != nil, nextHot: next, err: err}
+		default:
+			items, next, err := m.st.ListRoomTopLevelNewPage(ctx, roomID, 30, beforeNew)
+			return feedLoadedMsg{items: items, append: true, hasMore: next != nil, nextNew: next, err: err}
+		}
 	}
 }
 
@@ -1470,6 +1627,44 @@ func (m *Model) cycleHomeTopRange() {
 	default:
 		m.homeTopRange = store.TopWeek
 	}
+}
+
+func (m *Model) cycleFeedSort() {
+	switch m.feedSort {
+	case store.SortHot:
+		m.feedSort = store.SortNew
+	case store.SortNew:
+		m.feedSort = store.SortTop
+	case store.SortTop:
+		m.feedSort = store.SortHot
+	default:
+		m.feedSort = store.SortHot
+	}
+	m.feedNewCur = nil
+	m.feedTopCur = nil
+	m.feedHotCur = nil
+	m.feedHasMore = false
+	m.feedPending = 0
+}
+
+func (m *Model) cycleFeedTopRange() {
+	switch m.feedTopRange {
+	case store.TopToday:
+		m.feedTopRange = store.TopWeek
+	case store.TopWeek:
+		m.feedTopRange = store.TopMonth
+	case store.TopMonth:
+		m.feedTopRange = store.TopAll
+	case store.TopAll:
+		m.feedTopRange = store.TopToday
+	default:
+		m.feedTopRange = store.TopWeek
+	}
+	m.feedNewCur = nil
+	m.feedTopCur = nil
+	m.feedHotCur = nil
+	m.feedHasMore = false
+	m.feedPending = 0
 }
 
 func (m *Model) applyUpvote(messageID string, newCount int) {

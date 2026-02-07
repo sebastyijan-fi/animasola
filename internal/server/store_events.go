@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"time"
 
 	"animasola/internal/pubsub"
 	"animasola/internal/store"
@@ -68,6 +69,18 @@ func (s *storeWithEvents) UnreadCountsByCommunity(ctx context.Context, userID st
 
 func (s *storeWithEvents) ListRoomTopLevelNew(ctx context.Context, roomID string, limit int, beforeID *string) ([]store.FeedMessage, error) {
 	return s.st.ListRoomTopLevelNew(ctx, roomID, limit, beforeID)
+}
+
+func (s *storeWithEvents) ListRoomTopLevelNewPage(ctx context.Context, roomID string, limit int, beforeID *string) ([]store.FeedMessage, *string, error) {
+	return s.st.ListRoomTopLevelNewPage(ctx, roomID, limit, beforeID)
+}
+
+func (s *storeWithEvents) ListRoomTopLevelTopPage(ctx context.Context, roomID string, topRange store.TopRange, limit int, before *store.RoomTopCursor) ([]store.FeedMessage, *store.RoomTopCursor, error) {
+	return s.st.ListRoomTopLevelTopPage(ctx, roomID, topRange, limit, before)
+}
+
+func (s *storeWithEvents) ListRoomTopLevelHotPage(ctx context.Context, roomID string, now time.Time, limit int, before *store.RoomHotCursor) ([]store.FeedMessage, *store.RoomHotCursor, error) {
+	return s.st.ListRoomTopLevelHotPage(ctx, roomID, now, limit, before)
 }
 
 func (s *storeWithEvents) ListThread(ctx context.Context, rootMessageID string) ([]store.FeedMessage, error) {
