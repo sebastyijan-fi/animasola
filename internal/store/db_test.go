@@ -243,6 +243,87 @@ func TestTriggers_UpvotesAndRepliesAndFTS(t *testing.T) {
 	}
 }
 
+func TestGetUserProfile_ComputesStatsAndTopPosts(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "profile.db")
+
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	if err := st.Migrate(filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	u1, err := st.CreateUser(ctx, "seba", "fp1", "ssh-ed25519 AAAA...")
+	if err != nil {
+		t.Fatalf("CreateUser u1: %v", err)
+	}
+	u2, err := st.CreateUser(ctx, "kai", "fp2", "ssh-ed25519 AAAA...")
+	if err != nil {
+		t.Fatalf("CreateUser u2: %v", err)
+	}
+	c, r, err := st.CreateCommunity(ctx, u1.ID, "rust", "All things Rust")
+	if err != nil {
+		t.Fatalf("CreateCommunity: %v", err)
+	}
+	if err := st.JoinCommunity(ctx, u2.ID, c.ID); err != nil {
+		t.Fatalf("JoinCommunity: %v", err)
+	}
+
+	post1, err := st.CreateMessage(ctx, r.ID, u1.ID, "post1", nil)
+	if err != nil {
+		t.Fatalf("CreateMessage post1: %v", err)
+	}
+	post2, err := st.CreateMessage(ctx, r.ID, u1.ID, "post2", nil)
+	if err != nil {
+		t.Fatalf("CreateMessage post2: %v", err)
+	}
+	_, err = st.CreateMessage(ctx, r.ID, u1.ID, "reply", &post1.ID)
+	if err != nil {
+		t.Fatalf("CreateMessage reply: %v", err)
+	}
+	if _, err := st.ToggleUpvote(ctx, u2.ID, post2.ID); err != nil {
+		t.Fatalf("ToggleUpvote: %v", err)
+	}
+
+	p, err := st.GetUserProfile(ctx, "seba")
+	if err != nil {
+		t.Fatalf("GetUserProfile: %v", err)
+	}
+	if p == nil {
+		t.Fatalf("expected profile")
+	}
+	if p.UserID != u1.ID {
+		t.Fatalf("expected profile user id %q, got %q", u1.ID, p.UserID)
+	}
+	if p.Posts != 2 || p.Replies != 1 {
+		t.Fatalf("expected posts=2 replies=1, got posts=%d replies=%d", p.Posts, p.Replies)
+	}
+	if p.UpvotesRec != 1 {
+		t.Fatalf("expected upvotes received=1, got %d", p.UpvotesRec)
+	}
+	found := false
+	for _, n := range p.ActiveIn {
+		if n == "rust" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected ActiveIn to contain rust, got %#v", p.ActiveIn)
+	}
+	if len(p.TopPosts) != 2 {
+		t.Fatalf("expected 2 top posts, got %d", len(p.TopPosts))
+	}
+	if p.TopPosts[0].ID != post2.ID {
+		t.Fatalf("expected top post to be post2")
+	}
+}
+
 func TestCreateCommunity_CreatesGeneralRoom(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "comm.db")

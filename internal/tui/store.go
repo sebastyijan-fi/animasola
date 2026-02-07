@@ -23,6 +23,7 @@ type Store interface {
 	ListHomeHotPage(ctx context.Context, userID string, now time.Time, limit int, before *store.HomeHotCursor) ([]store.FeedMessage, *store.HomeHotCursor, error)
 	SearchMessages(ctx context.Context, userID string, query string, limit int) ([]store.SearchResult, error)
 	ResolveThreadRootID(ctx context.Context, messageID string) (string, error)
+	GetUserProfile(ctx context.Context, username string) (*store.UserProfile, error)
 	CreateRoom(ctx context.Context, communityID, name string) (*store.Room, error)
 	ListRoomsByCommunity(ctx context.Context, communityID string) ([]store.Room, error)
 	CountRoomsByCommunity(ctx context.Context, communityID string) (int, error)

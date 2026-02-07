@@ -76,6 +76,10 @@ func (s *storeWithEvents) ResolveThreadRootID(ctx context.Context, messageID str
 	return s.st.ResolveThreadRootID(ctx, messageID)
 }
 
+func (s *storeWithEvents) GetUserProfile(ctx context.Context, username string) (*store.UserProfile, error) {
+	return s.st.GetUserProfile(ctx, username)
+}
+
 func (s *storeWithEvents) CreateRoom(ctx context.Context, communityID, name string) (*store.Room, error) {
 	return s.st.CreateRoom(ctx, communityID, name)
 }

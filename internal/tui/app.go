@@ -26,6 +26,7 @@ const (
 	viewCommunity
 	viewRoom
 	viewThread
+	viewProfile
 )
 
 type focus int
@@ -127,6 +128,9 @@ type Model struct {
 	threadRootID string
 	threadItems  []threadItem
 	threadSel    int
+
+	profile    *store.UserProfile
+	profileSel int
 
 	replyToID       *string
 	replyToUsername string
@@ -343,6 +347,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.expl = msg.communities
+		return m, nil
+	case profileLoadedMsg:
+		if msg.err != nil {
+			m.flashErr("Something went wrong. Try again.")
+			return m, nil
+		}
+		if msg.profile == nil {
+			m.flashErr("User not found.")
+			return (&m).pop()
+		}
+		m.profile = msg.profile
+		m.profileSel = clampIndex(m.profileSel, len(m.profile.TopPosts))
 		return m, nil
 	case roomsLoadedMsg:
 		if msg.err != nil {
@@ -1032,6 +1048,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+		case viewProfile:
+			switch km.String() {
+			case "up":
+				if m.profileSel > 0 {
+					m.profileSel--
+				}
+				return m, nil
+			case "down":
+				if m.profile != nil && m.profileSel < len(m.profile.TopPosts)-1 {
+					m.profileSel++
+				}
+				return m, nil
+			case "enter":
+				if m.mainFocus != mainNav {
+					goto input
+				}
+				if m.profile == nil || m.profileSel < 0 || m.profileSel >= len(m.profile.TopPosts) {
+					return m, nil
+				}
+				it := m.profile.TopPosts[m.profileSel]
+				m.v = viewThread
+				m.push(nav{v: viewProfile})
+				return m, tea.Batch(m.cmdLoadRoomContext(it.CommunityID, it.RoomID), m.cmdLoadThread(it.ID))
+			}
 		}
 	}
 
@@ -1112,6 +1152,8 @@ func (m Model) View() string {
 			b.WriteString(m.viewRoom())
 		case viewThread:
 			b.WriteString(m.viewThread())
+		case viewProfile:
+			b.WriteString(m.viewProfile())
 		}
 	}
 
@@ -1314,6 +1356,12 @@ func (m Model) header() string {
 			loc = fmt.Sprintf("%s · #%s · thread", m.curCommunity.Name, m.curRoom.Name)
 		} else {
 			loc = "thread"
+		}
+	case viewProfile:
+		if m.profile != nil {
+			loc = fmt.Sprintf("@%s", m.profile.Username)
+		} else {
+			loc = "profile"
 		}
 	}
 
@@ -1569,6 +1617,47 @@ func (m Model) viewSearch() string {
 	return b.String()
 }
 
+func (m Model) viewProfile() string {
+	if m.profile == nil {
+		return "(no profile)\n"
+	}
+	p := m.profile
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("%s · joined %s\n\n", p.Username, relTime(p.CreatedAt)))
+	b.WriteString(fmt.Sprintf("Posts: %d · Replies: %d · Upvotes received: %d\n", p.Posts, p.Replies, p.UpvotesRec))
+	if len(p.ActiveIn) > 0 {
+		b.WriteString("Active in: ")
+		b.WriteString(strings.Join(p.ActiveIn, ", "))
+		b.WriteString("\n")
+	}
+	b.WriteString("\nTop posts:\n\n")
+	if len(p.TopPosts) == 0 {
+		b.WriteString("(none)\n")
+		return b.String()
+	}
+	for i, it := range p.TopPosts {
+		prefix := "  "
+		if i == m.profileSel {
+			prefix = "> "
+		}
+		content := it.Content
+		if it.IsDeleted {
+			content = "[deleted]"
+		}
+		// First line preview.
+		if j := strings.IndexByte(content, '\n'); j >= 0 {
+			content = content[:j]
+		}
+		content = strings.TrimSpace(content)
+		if content == "" {
+			content = "(empty)"
+		}
+		b.WriteString(fmt.Sprintf("%s%s  (%d↑)\n", prefix, content, it.Upvotes))
+	}
+	b.WriteString("\nEnter opens thread. Esc goes back.\n")
+	return b.String()
+}
+
 func (m *Model) handleEnter() tea.Cmd {
 	line := strings.TrimSpace(m.input.Value())
 	if line == "" {
@@ -1702,6 +1791,28 @@ func (m *Model) execCommand(cmd *Command) tea.Cmd {
 		}
 		// TODO(phase 6): enforce admin role.
 		return m.cmdCreateRoom(m.curCommunity.ID, name)
+	case "me":
+		if m.user == nil {
+			m.flashErr("Not authenticated.")
+			return nil
+		}
+		prev := m.v
+		m.v = viewProfile
+		m.profile = nil
+		m.profileSel = 0
+		m.push(nav{v: prev})
+		return m.cmdLoadProfile(m.user.Username)
+	case "user":
+		if len(cmd.Args) != 1 {
+			m.flashErr("Usage: /user username")
+			return nil
+		}
+		prev := m.v
+		m.v = viewProfile
+		m.profile = nil
+		m.profileSel = 0
+		m.push(nav{v: prev})
+		return m.cmdLoadProfile(cmd.Args[0])
 	case "quit", "q":
 		if m.cancel != nil {
 			m.cancel()
@@ -2232,6 +2343,11 @@ type searchLoadedMsg struct {
 	err     error
 }
 
+type profileLoadedMsg struct {
+	profile *store.UserProfile
+	err     error
+}
+
 func (m Model) cmdLoadExplore() tea.Cmd {
 	userID := ""
 	if m.user != nil {
@@ -2242,6 +2358,15 @@ func (m Model) cmdLoadExplore() tea.Cmd {
 		defer cancel()
 		cs, err := m.st.ListExploreCommunities(ctx, userID, 100)
 		return exploreLoadedMsg{communities: cs, err: err}
+	}
+}
+
+func (m Model) cmdLoadProfile(username string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		p, err := m.st.GetUserProfile(ctx, username)
+		return profileLoadedMsg{profile: p, err: err}
 	}
 }
 

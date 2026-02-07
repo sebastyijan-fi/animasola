@@ -23,6 +23,8 @@ type fakeStore struct {
 	search    []store.SearchResult
 	thread    map[string][]store.FeedMessage
 	roomsByID map[string]store.Room
+
+	profiles map[string]*store.UserProfile
 }
 
 func (f *fakeStore) CreateCommunity(ctx context.Context, createdByUserID, name, description string) (*store.Community, *store.Room, error) {
@@ -165,6 +167,15 @@ func (f *fakeStore) SearchMessages(ctx context.Context, userID string, query str
 }
 func (f *fakeStore) ResolveThreadRootID(ctx context.Context, messageID string) (string, error) {
 	return messageID, nil
+}
+func (f *fakeStore) GetUserProfile(ctx context.Context, username string) (*store.UserProfile, error) {
+	if f.profiles == nil {
+		return nil, nil
+	}
+	if p, ok := f.profiles[strings.ToLower(username)]; ok {
+		return p, nil
+	}
+	return nil, nil
 }
 func (f *fakeStore) ListThread(ctx context.Context, rootMessageID string) ([]store.FeedMessage, error) {
 	if f.thread == nil {
@@ -574,6 +585,62 @@ func TestCommandAutocompleteCompletesArgFromJoined(t *testing.T) {
 	m = updated.(Model)
 	if got := m.input.Value(); got != "/leave rust" {
 		t.Fatalf("expected /leave rust, got %q", got)
+	}
+}
+
+func TestMeCommandLoadsProfileView(t *testing.T) {
+	fs := &fakeStore{
+		profiles: map[string]*store.UserProfile{
+			"seba": {UserID: "u1", Username: "seba", CreatedAt: time.Now().UTC()},
+		},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	m.focus = focusMain
+	m.mainFocus = mainInput
+	m.input.Focus()
+	m.input.SetValue("/me")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected cmd")
+	}
+	model := applyCmd(t, m, cmd)
+	m = model.(Model)
+	if m.v != viewProfile {
+		t.Fatalf("expected viewProfile")
+	}
+	if m.profile == nil || m.profile.Username != "seba" {
+		t.Fatalf("expected seba profile loaded")
+	}
+}
+
+func TestUserCommandLoadsProfileView(t *testing.T) {
+	fs := &fakeStore{
+		profiles: map[string]*store.UserProfile{
+			"kai": {UserID: "u2", Username: "kai", CreatedAt: time.Now().UTC()},
+		},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	m.focus = focusMain
+	m.mainFocus = mainInput
+	m.input.Focus()
+	m.input.SetValue("/user kai")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected cmd")
+	}
+	model := applyCmd(t, m, cmd)
+	m = model.(Model)
+	if m.v != viewProfile {
+		t.Fatalf("expected viewProfile")
+	}
+	if m.profile == nil || m.profile.Username != "kai" {
+		t.Fatalf("expected kai profile loaded")
 	}
 }
 
