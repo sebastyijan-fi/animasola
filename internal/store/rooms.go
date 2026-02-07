@@ -115,3 +115,16 @@ func (s *Store) ListRoomsByCommunity(ctx context.Context, communityID string) ([
 	}
 	return out, rows.Err()
 }
+
+func (s *Store) CountRoomsByCommunity(ctx context.Context, communityID string) (int, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM rooms
+		WHERE community_id = ?
+	`, communityID)
+	var n int
+	if err := row.Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}

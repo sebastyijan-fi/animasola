@@ -76,8 +76,16 @@ func (s *storeWithEvents) ResolveThreadRootID(ctx context.Context, messageID str
 	return s.st.ResolveThreadRootID(ctx, messageID)
 }
 
+func (s *storeWithEvents) CreateRoom(ctx context.Context, communityID, name string) (*store.Room, error) {
+	return s.st.CreateRoom(ctx, communityID, name)
+}
+
 func (s *storeWithEvents) ListRoomsByCommunity(ctx context.Context, communityID string) ([]store.Room, error) {
 	return s.st.ListRoomsByCommunity(ctx, communityID)
+}
+
+func (s *storeWithEvents) CountRoomsByCommunity(ctx context.Context, communityID string) (int, error) {
+	return s.st.CountRoomsByCommunity(ctx, communityID)
 }
 
 func (s *storeWithEvents) GetRoomByID(ctx context.Context, id string) (*store.Room, error) {

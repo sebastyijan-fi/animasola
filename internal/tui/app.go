@@ -477,6 +477,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.v = viewCommunity
 		m.push(nav{v: viewExplore})
 		return m, tea.Batch(m.cmdLoadJoined(), m.cmdLoadRooms(msg.community.ID))
+	case roomCreatedMsg:
+		if msg.err != nil {
+			if errors.Is(msg.err, store.ErrLimit) {
+				m.flashErr("Room limit reached (max 20).")
+				return m, nil
+			}
+			m.flashErr("Could not create room.")
+			return m, nil
+		}
+		m.curRoom = msg.room
+		m.v = viewRoom
+		m.feedSort = store.SortHot
+		m.feedTopRange = store.TopWeek
+		m.feedNewCur = nil
+		m.feedTopCur = nil
+		m.feedHotCur = nil
+		m.feedHasMore = false
+		m.feedLoading = true
+		m.feedSpinIdx = 0
+		m.feedPending = 0
+		m.focus = focusMain
+		m.mainFocus = mainInput
+		m.input.Focus()
+		m.push(nav{v: viewCommunity, communityID: msg.communityID, roomSel: m.roomSel})
+		return m, tea.Batch(m.cmdLoadRooms(msg.communityID), m.cmdLoadFeedReset(), m.cmdLoadUnread())
 	case leftCommunityMsg:
 		if msg.err != nil {
 			m.flashErr("Could not leave community.")
@@ -1439,7 +1464,7 @@ func (m *Model) handleCreateFlow(line string) tea.Cmd {
 func (m *Model) execCommand(cmd *Command) tea.Cmd {
 	switch strings.ToLower(cmd.Name) {
 	case "help":
-		m.flashErr("Commands: /explore /join <community> /leave <community> /create-community /search <query> /quit (/q)")
+		m.flashErr("Commands: /explore /join <community> /leave <community> /create-community /create-room <name> /rooms /search <query> /quit (/q)")
 		return nil
 	case "explore":
 		m.v = viewExplore
@@ -1487,6 +1512,34 @@ func (m *Model) execCommand(cmd *Command) tea.Cmd {
 		m.leaveCommunity = found.Name
 		m.flashErr(fmt.Sprintf("Leave %s? (y/n)", found.Name))
 		return nil
+	case "rooms":
+		if m.curCommunity == nil {
+			m.flashErr("No community selected.")
+			return nil
+		}
+		prev := m.v
+		m.v = viewCommunity
+		m.push(nav{v: prev})
+		m.focus = focusMain
+		m.mainFocus = mainNav
+		m.input.Blur()
+		return m.cmdLoadRooms(m.curCommunity.ID)
+	case "create-room":
+		if len(cmd.Args) != 1 {
+			m.flashErr("Usage: /create-room name")
+			return nil
+		}
+		if m.curCommunity == nil {
+			m.flashErr("No community selected.")
+			return nil
+		}
+		name := strings.TrimPrefix(cmd.Args[0], "#")
+		if !communityNameRe.MatchString(name) {
+			m.flashErr("Invalid room name (2-30, lowercase letters/numbers/hyphens; start with letter)")
+			return nil
+		}
+		// TODO(phase 6): enforce admin role.
+		return m.cmdCreateRoom(m.curCommunity.ID, name)
 	case "quit", "q":
 		if m.cancel != nil {
 			m.cancel()
@@ -2289,6 +2342,28 @@ func (m Model) cmdCreateCommunity(name, desc string) tea.Cmd {
 		defer cancel()
 		c, r, err := m.st.CreateCommunity(ctx, userID, name, desc)
 		return communityCreatedMsg{community: c, room: r, err: err}
+	}
+}
+
+type roomCreatedMsg struct {
+	communityID string
+	room        *store.Room
+	err         error
+}
+
+func (m Model) cmdCreateRoom(communityID, name string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		n, err := m.st.CountRoomsByCommunity(ctx, communityID)
+		if err != nil {
+			return roomCreatedMsg{communityID: communityID, err: err}
+		}
+		if n >= 20 {
+			return roomCreatedMsg{communityID: communityID, err: store.ErrLimit}
+		}
+		r, err := m.st.CreateRoom(ctx, communityID, name)
+		return roomCreatedMsg{communityID: communityID, room: r, err: err}
 	}
 }
 

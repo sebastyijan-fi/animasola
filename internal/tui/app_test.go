@@ -101,6 +101,18 @@ func (f *fakeStore) ListHomeHotPage(ctx context.Context, userID string, now time
 func (f *fakeStore) ListRoomsByCommunity(ctx context.Context, communityID string) ([]store.Room, error) {
 	return f.rooms[communityID], nil
 }
+func (f *fakeStore) CountRoomsByCommunity(ctx context.Context, communityID string) (int, error) {
+	return len(f.rooms[communityID]), nil
+}
+func (f *fakeStore) CreateRoom(ctx context.Context, communityID, name string) (*store.Room, error) {
+	if f.rooms == nil {
+		f.rooms = make(map[string][]store.Room)
+	}
+	r := store.Room{ID: "r_new", Name: name, CommunityID: communityID}
+	f.rooms[communityID] = append(f.rooms[communityID], r)
+	rr := r
+	return &rr, nil
+}
 func (f *fakeStore) GetRoomByID(ctx context.Context, id string) (*store.Room, error) {
 	if f.roomsByID != nil {
 		if r, ok := f.roomsByID[id]; ok {
@@ -403,6 +415,107 @@ func TestQuitCommandReturnsQuitMsg(t *testing.T) {
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
 		t.Fatalf("expected QuitMsg")
+	}
+}
+
+func TestCreateRoomCommandCreatesRoomAndOpensIt(t *testing.T) {
+	fs := &fakeStore{
+		joined: []store.Community{{ID: "c1", Name: "rust"}},
+		rooms: map[string][]store.Room{
+			"c1": {{ID: "r1", Name: "general", CommunityID: "c1"}},
+		},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = model.(Model)
+	model = applyCmd(t, m, m.cmdLoadJoined())
+	m = model.(Model)
+
+	m.curCommunity = &store.Community{ID: "c1", Name: "rust"}
+	m.v = viewCommunity
+	m.focus = focusMain
+	m.mainFocus = mainInput
+	m.input.Focus()
+	m.input.SetValue("/create-room help")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected create room cmd")
+	}
+	model = applyCmd(t, m, cmd)
+	m = model.(Model)
+	if m.v != viewRoom {
+		t.Fatalf("expected viewRoom, got %v", m.v)
+	}
+	if m.curRoom == nil || m.curRoom.Name != "help" {
+		t.Fatalf("expected curRoom=help, got %#v", m.curRoom)
+	}
+	found := false
+	for _, r := range fs.rooms["c1"] {
+		if r.Name == "help" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected room to be created in store")
+	}
+}
+
+func TestCreateRoomCommandRejectsInvalidName(t *testing.T) {
+	fs := &fakeStore{
+		joined: []store.Community{{ID: "c1", Name: "rust"}},
+		rooms:  map[string][]store.Room{"c1": {{ID: "r1", Name: "general", CommunityID: "c1"}}},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	m.curCommunity = &store.Community{ID: "c1", Name: "rust"}
+	m.v = viewCommunity
+	m.focus = focusMain
+	m.mainFocus = mainInput
+	m.input.Focus()
+	m.input.SetValue("/create-room BadName")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("expected no cmd")
+	}
+	if !strings.Contains(m.errMsg, "Invalid room name") {
+		t.Fatalf("expected error about invalid room name, got %q", m.errMsg)
+	}
+	if len(fs.rooms["c1"]) != 1 {
+		t.Fatalf("expected no room created")
+	}
+}
+
+func TestRoomsCommandNavigatesToCommunityView(t *testing.T) {
+	fs := &fakeStore{
+		joined: []store.Community{{ID: "c1", Name: "rust"}},
+		rooms: map[string][]store.Room{
+			"c1": {{ID: "r1", Name: "general", CommunityID: "c1"}},
+		},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	m.curCommunity = &store.Community{ID: "c1", Name: "rust"}
+	m.curRoom = &store.Room{ID: "r1", Name: "general", CommunityID: "c1"}
+	m.v = viewRoom
+	m.focus = focusMain
+	m.mainFocus = mainInput
+	m.input.Focus()
+	m.input.SetValue("/rooms")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected load rooms cmd")
+	}
+	model := applyCmd(t, m, cmd)
+	m = model.(Model)
+	if m.v != viewCommunity {
+		t.Fatalf("expected viewCommunity")
 	}
 }
 
