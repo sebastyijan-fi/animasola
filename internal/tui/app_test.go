@@ -118,8 +118,12 @@ func TestTypingDoesNotTriggerShortcuts(t *testing.T) {
 	u := &store.User{ID: "u1", Username: "seba"}
 	m := NewApp("animasola", fs, nil, u)
 
+	// Enable sidebar visibility logic.
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = model.(Model)
+
 	// Default focus is input.
-	model, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	model, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
 	m = model.(Model)
 	if m.v != viewHome {
 		t.Fatalf("expected to stay on home view, got %v", m.v)
@@ -128,13 +132,53 @@ func TestTypingDoesNotTriggerShortcuts(t *testing.T) {
 		t.Fatalf("expected input to capture typed rune")
 	}
 
-	// Switch to nav focus and ensure shortcut works.
-	model, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	// Leave input and ensure shortcut works.
+	model, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	m = model.(Model)
 	model, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
 	m = model.(Model)
 	if m.v != viewCommunities {
 		t.Fatalf("expected to navigate to communities view, got %v", m.v)
+	}
+}
+
+func TestSidebarTabTogglesFocusAndHidesBelow60(t *testing.T) {
+	fs := &fakeStore{}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = model.(Model)
+	if m.sidebarVisible() != true {
+		t.Fatalf("expected sidebar visible")
+	}
+	if m.focus != focusMain {
+		t.Fatalf("expected focusMain by default")
+	}
+
+	model, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = model.(Model)
+	if m.focus != focusSidebar {
+		t.Fatalf("expected focusSidebar after tab")
+	}
+
+	model, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = model.(Model)
+	if m.focus != focusMain {
+		t.Fatalf("expected focusMain after tab back")
+	}
+
+	model, _ = m.Update(tea.WindowSizeMsg{Width: 59, Height: 24})
+	m = model.(Model)
+	if m.sidebarVisible() != false {
+		t.Fatalf("expected sidebar hidden below 60 cols")
+	}
+
+	prev := m.focus
+	model, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = model.(Model)
+	if m.focus != prev {
+		t.Fatalf("expected tab no-op when sidebar hidden")
 	}
 }
 

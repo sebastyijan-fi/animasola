@@ -10,6 +10,7 @@ import (
 
 	"animasola/internal/pubsub"
 	"animasola/internal/store"
+	"animasola/internal/tui/components"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -30,8 +31,15 @@ const (
 type focus int
 
 const (
-	focusNav focus = iota
-	focusInput
+	focusSidebar focus = iota
+	focusMain
+)
+
+type mainFocus int
+
+const (
+	mainNav mainFocus = iota
+	mainInput
 )
 
 type nav struct {
@@ -66,7 +74,10 @@ type Model struct {
 	width  int
 	height int
 
-	focus focus
+	focus     focus
+	mainFocus mainFocus
+
+	sidebar components.SidebarModel
 
 	v     view
 	stack []nav
@@ -83,6 +94,12 @@ type Model struct {
 	curRoom      *store.Room
 	feed         []store.FeedMessage
 	feedSel      int
+
+	unreadByCommunity map[string]int
+
+	pendingReadRoomID string
+	pendingReadMsgID  string
+	lastReadWrite     time.Time
 
 	homeItems      []store.FeedMessage
 	homeSel        int
@@ -116,6 +133,15 @@ type threadItem struct {
 	overflowCtx string
 }
 
+func isShortcutRune(r rune) bool {
+	switch r {
+	case 'h', 'c', 'e', 'q', 'r', 'u', 'd', 's', 't':
+		return true
+	default:
+		return false
+	}
+}
+
 func NewApp(appName string, st Store, broker *pubsub.Broker[pubsub.Event], user *store.User) Model {
 	ti := textinput.New()
 	ti.Placeholder = "/help"
@@ -124,15 +150,18 @@ func NewApp(appName string, st Store, broker *pubsub.Broker[pubsub.Event], user 
 	ti.Focus()
 
 	m := Model{
-		appName:      appName,
-		st:           st,
-		broker:       broker,
-		user:         user,
-		focus:        focusInput,
-		v:            viewHome,
-		input:        ti,
-		homeSort:     store.SortHot,
-		homeTopRange: store.TopWeek,
+		appName:           appName,
+		st:                st,
+		broker:            broker,
+		user:              user,
+		focus:             focusMain,
+		mainFocus:         mainInput,
+		sidebar:           components.SidebarModel{Focused: false},
+		v:                 viewHome,
+		input:             ti,
+		homeSort:          store.SortHot,
+		homeTopRange:      store.TopWeek,
+		unreadByCommunity: make(map[string]int),
 	}
 	if broker != nil {
 		_, ch, cancel := broker.Subscribe(256)
@@ -144,9 +173,9 @@ func NewApp(appName string, st Store, broker *pubsub.Broker[pubsub.Event], user 
 
 func (m Model) Init() tea.Cmd {
 	if m.events != nil {
-		return tea.Batch(m.cmdLoadJoined(), m.cmdLoadHomeReset(), textinput.Blink, waitForEvent(m.events))
+		return tea.Batch(m.cmdLoadJoined(), m.cmdLoadUnread(), m.cmdLoadHomeReset(), textinput.Blink, waitForEvent(m.events))
 	}
-	return tea.Batch(m.cmdLoadJoined(), m.cmdLoadHomeReset(), textinput.Blink)
+	return tea.Batch(m.cmdLoadJoined(), m.cmdLoadUnread(), m.cmdLoadHomeReset(), textinput.Blink)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -154,6 +183,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.input.Width = max(10, m.mainWidth()-2)
+		m.rebuildSidebarItems()
 		return m, nil
 	}
 
@@ -165,6 +196,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.joined = msg.communities
+		m.sidebar.Selected = clampIndex(m.sidebar.Selected, len(m.joined))
+		m.rebuildSidebarItems()
+		return m, m.cmdLoadUnread()
+	case unreadLoadedMsg:
+		if msg.err != nil {
+			m.flashErr("Something went wrong. Try again.")
+			return m, nil
+		}
+		m.unreadByCommunity = make(map[string]int, len(msg.rows))
+		for _, r := range msg.rows {
+			m.unreadByCommunity[r.CommunityID] = r.Count
+		}
+		m.rebuildSidebarItems()
 		return m, nil
 	case exploreLoadedMsg:
 		if msg.err != nil {
@@ -192,6 +236,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.curRoom = msg.room
 		}
 		return m, nil
+	case openCommunityMsg:
+		if msg.err != nil {
+			m.flashErr("Something went wrong. Try again.")
+			return m, nil
+		}
+		m.curCommunity = msg.community
+		m.rooms = msg.rooms
+		if msg.room != nil {
+			m.curRoom = msg.room
+			m.v = viewRoom
+			m.focus = focusMain
+			m.mainFocus = mainInput
+			m.input.Focus()
+			return m, tea.Batch(m.cmdLoadFeed(), m.cmdLoadUnread())
+		}
+		m.v = viewCommunity
+		return m, m.cmdLoadUnread()
 	case feedLoadedMsg:
 		if msg.err != nil {
 			m.flashErr("Something went wrong. Try again.")
@@ -200,6 +261,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.feed = msg.items
 		if m.feedSel >= len(m.feed) {
 			m.feedSel = max(0, len(m.feed)-1)
+		}
+		if m.v == viewRoom && m.curRoom != nil && len(m.feed) > 0 {
+			id := newestMessageID(m.feed)
+			return m, tea.Batch(m.cmdMarkRead(m.curRoom.ID, id), m.cmdLoadUnread())
 		}
 		return m, nil
 	case homeLoadedMsg:
@@ -228,6 +293,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.threadItems = buildThreadItems(msg.items, msg.rootID)
 		if m.threadSel >= len(m.threadItems) {
 			m.threadSel = max(0, len(m.threadItems)-1)
+		}
+		if m.v == viewThread && m.curRoom != nil && len(msg.items) > 0 {
+			id := newestMessageID(msg.items)
+			return m, tea.Batch(m.cmdMarkRead(m.curRoom.ID, id), m.cmdLoadUnread())
 		}
 		return m, nil
 	case communityCreatedMsg:
@@ -298,21 +367,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case viewHome:
 			if em.evt.Type == pubsub.EventNewMessage {
 				if m.homeSort == store.SortNew {
-					return m, tea.Batch(m.cmdLoadHomeReset(), waitForEvent(m.events))
+					return m, tea.Batch(m.cmdLoadHomeReset(), m.cmdLoadUnread(), waitForEvent(m.events))
 				}
 				m.homeNewPending++
 			}
-			return m, waitForEvent(m.events)
+			return m, tea.Batch(m.cmdLoadUnread(), waitForEvent(m.events))
 		case viewRoom:
 			if m.curRoom != nil && em.evt.RoomID == m.curRoom.ID {
-				return m, tea.Batch(m.cmdLoadFeed(), waitForEvent(m.events))
+				return m, tea.Batch(m.cmdLoadFeed(), m.cmdLoadUnread(), waitForEvent(m.events))
 			}
 		case viewThread:
 			if m.curRoom != nil && em.evt.RoomID == m.curRoom.ID {
-				return m, tea.Batch(m.cmdLoadThread(m.threadRootID), waitForEvent(m.events))
+				return m, tea.Batch(m.cmdLoadThread(m.threadRootID), m.cmdLoadUnread(), waitForEvent(m.events))
 			}
 		}
-		return m, waitForEvent(m.events)
+		return m, tea.Batch(m.cmdLoadUnread(), waitForEvent(m.events))
 	}
 
 	// key handling depends on focus.
@@ -340,32 +409,63 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		case "tab":
-			if m.focus == focusInput {
-				m.focus = focusNav
-				m.input.Blur()
-			} else {
-				m.focus = focusInput
-				m.input.Focus()
+			if m.sidebarVisible() {
+				if m.focus == focusMain {
+					m.focus = focusSidebar
+					m.mainFocus = mainNav
+					m.input.Blur()
+				} else {
+					m.focus = focusMain
+				}
+				m.rebuildSidebarItems()
+				return m, nil
 			}
 			return m, nil
 		case "esc":
-			if m.focus == focusInput {
-				if strings.TrimSpace(m.input.Value()) != "" {
-					m.input.SetValue("")
-					return m, nil
-				}
-				m.focus = focusNav
+			if m.focus == focusMain && m.mainFocus == mainInput {
+				m.mainFocus = mainNav
 				m.input.Blur()
-				// Esc cancels reply composition context when leaving the input.
-				m.replyToID = nil
-				m.replyToUsername = ""
-				m.input.Placeholder = "/help"
 				return m, nil
 			}
 			return (&m).pop()
 		}
 
-		if m.focus == focusNav {
+		if m.focus == focusSidebar {
+			switch km.String() {
+			case "up":
+				if m.sidebar.Selected > 0 {
+					m.sidebar.Selected--
+				}
+				m.joinedSel = m.sidebar.Selected
+				return m, nil
+			case "down":
+				if m.sidebar.Selected < len(m.joined)-1 {
+					m.sidebar.Selected++
+				}
+				m.joinedSel = m.sidebar.Selected
+				return m, nil
+			case "enter":
+				if len(m.joined) == 0 {
+					return m, nil
+				}
+				c := m.joined[m.sidebar.Selected]
+				return m, m.cmdOpenCommunityDefault(c.ID)
+			}
+		}
+
+		if m.focus == focusMain && m.mainFocus == mainNav {
+			// Allow typing to re-focus the input after Esc, without stealing single-key shortcuts.
+			if km.Type == tea.KeyRunes && len(km.Runes) == 1 {
+				r := km.Runes[0]
+				if r == '/' || r == ' ' || !isShortcutRune(r) {
+					m.mainFocus = mainInput
+					m.input.Focus()
+					var cmd tea.Cmd
+					m.input, cmd = m.input.Update(km)
+					return m, cmd
+				}
+			}
+
 			switch km.String() {
 			case "q":
 				if m.cancel != nil {
@@ -412,8 +512,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// local navigation per view
 	if km, ok := msg.(tea.KeyMsg); ok {
-		if m.focus != focusNav {
-			// When the input is focused, typed keys should never trigger navigation.
+		if m.focus != focusMain {
 			goto input
 		}
 		switch m.v {
@@ -434,6 +533,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "enter":
+				if m.mainFocus != mainNav {
+					goto input
+				}
 				id := m.selectedHomeMessageID()
 				if id == "" {
 					return m, nil
@@ -457,6 +559,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "enter":
+				if m.mainFocus != mainNav {
+					goto input
+				}
 				if len(m.joined) == 0 {
 					return m, nil
 				}
@@ -479,6 +584,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "j", "enter":
+				if km.String() == "enter" && m.mainFocus != mainNav {
+					goto input
+				}
 				if len(m.expl) == 0 {
 					return m, nil
 				}
@@ -498,6 +606,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "enter":
+				if m.mainFocus != mainNav {
+					goto input
+				}
 				if len(m.rooms) == 0 {
 					return m, nil
 				}
@@ -520,6 +631,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "enter":
+				if m.mainFocus != mainNav {
+					goto input
+				}
 				root := m.selectedMessageID()
 				if root == "" {
 					return m, nil
@@ -546,10 +660,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 input:
 	// input handling
+	if m.focus != focusMain || m.mainFocus != mainInput {
+		return m, nil
+	}
+
+	// Don't feed navigation keys into the input.
+	if km, ok := msg.(tea.KeyMsg); ok {
+		switch km.String() {
+		case "up", "down", "left", "right", "pgup", "pgdown", "home", "end":
+			return m, nil
+		}
+	}
+
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	if km, ok := msg.(tea.KeyMsg); ok && km.String() == "enter" {
 		cmd2 := (&m).handleEnter()
+		// Stay in input mode.
+		m.mainFocus = mainInput
+		m.input.Focus()
 		return m, tea.Batch(cmd, cmd2)
 	}
 	return m, cmd
@@ -559,6 +688,8 @@ func (m Model) View() string {
 	if m.width > 0 && m.height > 0 && (m.width < 80 || m.height < 24) {
 		return lipgloss.NewStyle().Padding(1, 2).Render("Resize terminal to at least 80x24.\n")
 	}
+
+	mw := m.mainWidth()
 
 	var b strings.Builder
 	b.WriteString(m.header())
@@ -583,17 +714,26 @@ func (m Model) View() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(strings.Repeat("─", max(0, m.width-1))))
+	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(strings.Repeat("─", max(0, mw-1))))
 	b.WriteString("\n")
-	if m.focus == focusNav {
-		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("[nav] "))
-	}
 	if m.replyToID != nil && m.replyToUsername != "" {
 		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("replying to " + m.replyToUsername + ": "))
 	}
 	b.WriteString(m.input.View())
 	b.WriteString("\n")
-	return lipgloss.NewStyle().Padding(0, 1).Render(b.String())
+
+	mainStyle := lipgloss.NewStyle().Width(mw).Height(m.height)
+	main := mainStyle.Render(b.String())
+
+	if !m.sidebarVisible() {
+		return lipgloss.NewStyle().Padding(0, 1).Render(main)
+	}
+
+	sb := m.sidebar
+	sb.Focused = m.focus == focusSidebar
+	sbStr := sb.View(m.height)
+	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("│")
+	return lipgloss.JoinHorizontal(lipgloss.Top, sbStr, sep, main)
 }
 
 func (m *Model) flashErr(s string) {
@@ -640,6 +780,7 @@ func (m Model) viewHome() string {
 	if len(m.joined) == 0 {
 		return "No communities joined.\n\nKeys: e explore, /create-community\n"
 	}
+	mw := m.mainWidth()
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("Home · %s", m.homeSort))
 	if m.homeSort == store.SortTop {
@@ -670,7 +811,7 @@ func (m Model) viewHome() string {
 			content = "[deleted]"
 		}
 		b.WriteString(fmt.Sprintf("%s%s · #%s · %s · %s\n", sel, it.CommunityName, it.RoomName, author, relTime(it.CreatedAt)))
-		b.WriteString(wrap(content, max(20, m.width-6)))
+		b.WriteString(wrap(content, max(20, mw-6)))
 		b.WriteString(fmt.Sprintf("\n(%d↑ %d💬)\n\n", it.Upvotes, it.Replies))
 	}
 	b.WriteString("Nav: up/down select, Enter open thread, s cycle sort, t cycle top range, r refresh. Tab toggles input/nav.\n")
@@ -741,6 +882,7 @@ func (m Model) viewRoom() string {
 	if m.curRoom == nil {
 		return "No room selected.\n"
 	}
+	mw := m.mainWidth()
 	var b strings.Builder
 	if len(m.feed) == 0 {
 		b.WriteString("(no messages)\n")
@@ -760,7 +902,7 @@ func (m Model) viewRoom() string {
 			content = "[deleted]"
 		}
 		b.WriteString(fmt.Sprintf("%s%s · %s  (%d↑ %d💬)\n", sel, author, relTime(it.CreatedAt), it.Upvotes, it.Replies))
-		b.WriteString(wrap(content, max(20, m.width-6)))
+		b.WriteString(wrap(content, max(20, mw-6)))
 		b.WriteString("\n\n")
 	}
 	b.WriteString("Nav: up/down select, Enter thread, r reply, u upvote, d delete, Esc back. Tab toggles input/nav.\n")
@@ -771,6 +913,7 @@ func (m Model) viewThread() string {
 	if m.curRoom == nil {
 		return "No room selected.\n"
 	}
+	mw := m.mainWidth()
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("← Back to #%s\n\n", m.curRoom.Name))
 	if len(m.threadItems) == 0 {
@@ -794,7 +937,7 @@ func (m Model) viewThread() string {
 			content = "replying to " + it.overflowCtx + ": " + content
 		}
 		b.WriteString(fmt.Sprintf("%s%s%s · %s  (%d↑ %d💬)\n", sel, it.treePrefix, author, relTime(it.msg.CreatedAt), it.msg.Upvotes, it.msg.Replies))
-		b.WriteString(wrap(content, max(20, m.width-6-len(it.treePrefix))))
+		b.WriteString(wrap(content, max(20, mw-6-len(it.treePrefix))))
 		b.WriteString("\n\n")
 	}
 	b.WriteString("Nav: up/down select, r reply, u upvote, d delete, Esc back. Tab toggles input/nav.\n")
@@ -942,6 +1085,24 @@ func (m Model) cmdLoadJoined() tea.Cmd {
 	}
 }
 
+type unreadLoadedMsg struct {
+	rows []store.CommunityUnread
+	err  error
+}
+
+func (m Model) cmdLoadUnread() tea.Cmd {
+	userID := ""
+	if m.user != nil {
+		userID = m.user.ID
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		rows, err := m.st.UnreadCountsByCommunity(ctx, userID)
+		return unreadLoadedMsg{rows: rows, err: err}
+	}
+}
+
 type exploreLoadedMsg struct {
 	communities []store.Community
 	err         error
@@ -1027,6 +1188,41 @@ func (m Model) cmdLoadRoomContext(communityID, roomID string) tea.Cmd {
 		}
 		r, err := m.st.GetRoomByID(ctx, roomID)
 		return roomCtxLoadedMsg{community: c, room: r, err: err}
+	}
+}
+
+type openCommunityMsg struct {
+	community *store.Community
+	rooms     []store.Room
+	room      *store.Room
+	err       error
+}
+
+func (m Model) cmdOpenCommunityDefault(communityID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		c, err := m.st.GetCommunityByID(ctx, communityID)
+		if err != nil {
+			return openCommunityMsg{err: err}
+		}
+		rooms, err := m.st.ListRoomsByCommunity(ctx, communityID)
+		if err != nil {
+			return openCommunityMsg{err: err}
+		}
+		var chosen *store.Room
+		for i := range rooms {
+			if rooms[i].Name == "general" {
+				r := rooms[i]
+				chosen = &r
+				break
+			}
+		}
+		if chosen == nil && len(rooms) > 0 {
+			r := rooms[0]
+			chosen = &r
+		}
+		return openCommunityMsg{community: c, rooms: rooms, room: chosen}
 	}
 }
 
@@ -1133,7 +1329,8 @@ func (m *Model) startReply() (tea.Model, tea.Cmd) {
 	}
 	m.replyToID = &id
 	m.replyToUsername = username
-	m.focus = focusInput
+	m.focus = focusMain
+	m.mainFocus = mainInput
 	m.input.Focus()
 	return *m, nil
 }
@@ -1366,6 +1563,19 @@ func (m Model) cmdDelete(messageID string) tea.Cmd {
 	}
 }
 
+func (m Model) cmdMarkRead(roomID, msgID string) tea.Cmd {
+	if m.user == nil || roomID == "" || msgID == "" {
+		return nil
+	}
+	userID := m.user.ID
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = m.st.UpsertReadPosition(ctx, userID, roomID, msgID)
+		return nil
+	}
+}
+
 type eventMsg struct {
 	ok  bool
 	evt pubsub.Event
@@ -1435,4 +1645,56 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func clampIndex(i, n int) int {
+	if n <= 0 {
+		return 0
+	}
+	if i < 0 {
+		return 0
+	}
+	if i >= n {
+		return n - 1
+	}
+	return i
+}
+
+func (m *Model) sidebarVisible() bool {
+	return m.width >= 60 && m.v != viewThread
+}
+
+func (m *Model) mainWidth() int {
+	w := m.width
+	if m.sidebarVisible() {
+		w = w - components.SidebarWidth - 1
+	}
+	if w < 0 {
+		return 0
+	}
+	return w
+}
+
+func (m *Model) rebuildSidebarItems() {
+	items := make([]components.SidebarItem, 0, len(m.joined))
+	for _, c := range m.joined {
+		items = append(items, components.SidebarItem{
+			ID:     c.ID,
+			Name:   c.Name,
+			Unread: m.unreadByCommunity[c.ID],
+		})
+	}
+	m.sidebar.Items = items
+	m.sidebar.Selected = clampIndex(m.sidebar.Selected, len(items))
+	m.sidebar.Focused = m.focus == focusSidebar
+}
+
+func newestMessageID(items []store.FeedMessage) string {
+	maxID := ""
+	for _, it := range items {
+		if it.ID > maxID {
+			maxID = it.ID
+		}
+	}
+	return maxID
 }
