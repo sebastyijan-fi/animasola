@@ -657,6 +657,38 @@ func TestMouseWheelOnSidebarMovesSelectionWithoutFocus(t *testing.T) {
 	}
 }
 
+func TestMouseWheelOverMainScrollsMainEvenIfSidebarFocused(t *testing.T) {
+	fs := &fakeStore{
+		joined: []store.Community{{ID: "c1", Name: "rust"}},
+		home: []store.FeedMessage{
+			{Message: store.Message{ID: "m3", RoomID: "r1"}, CommunityName: "rust", RoomName: "general", AuthorUsername: "a"},
+			{Message: store.Message{ID: "m2", RoomID: "r1"}, CommunityName: "rust", RoomName: "general", AuthorUsername: "a"},
+			{Message: store.Message{ID: "m1", RoomID: "r1"}, CommunityName: "rust", RoomName: "general", AuthorUsername: "a"},
+		},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = model.(Model)
+	model = applyCmd(t, m, m.cmdLoadJoined())
+	m = model.(Model)
+	m.v = viewHome
+	m.homeSort = store.SortNew
+	m.focus = focusSidebar
+	m.mainFocus = mainNav
+	m.homeLoading = true
+	model = applyCmd(t, m, m.cmdLoadHomeReset())
+	m = model.(Model)
+	m.homeSel = 0
+
+	// Wheel down over main (x beyond sidebar+sep).
+	model, _ = m.Update(tea.MouseMsg{X: 25, Y: 5, Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
+	m = model.(Model)
+	if m.homeSel == 0 {
+		t.Fatalf("expected home selection to move on wheel over main")
+	}
+}
+
 func TestMouseClickHomeHeaderCyclesTopRangeWhenTop(t *testing.T) {
 	fs := &fakeStore{
 		joined: []store.Community{{ID: "c1", Name: "rust"}},

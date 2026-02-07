@@ -1494,6 +1494,21 @@ func (m Model) handleMouse(mm tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// Wheel routing based on cursor position.
+	// If the wheel event happens over the main content, treat it as main scrolling even if sidebar is focused.
+	if tea.MouseEvent(mm).IsWheel() {
+		x0 := m.mainX0()
+		// If search overlay is open, defer to the search handler (it has its own scroll/selection).
+		if mm.X >= x0 && !m.searchOpen {
+			// Wheel over the main content implies main navigation, regardless of where focus was.
+			// This avoids the "sidebar focused but I'm clearly scrolling the feed" mismatch.
+			m.focus = focusMain
+			m.mainFocus = mainNav
+			m.input.Blur()
+			return m.handleMouseWheelMainAnyFocus(mm)
+		}
+	}
+
 	// Sidebar interactions.
 	if m.sidebarVisible() && mm.X < components.SidebarWidth {
 		switch mm.Button {
@@ -1612,6 +1627,10 @@ func (m Model) handleMouseWheelMain(mm tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.focus != focusMain || m.mainFocus != mainNav {
 		return m, nil
 	}
+	return m.handleMouseWheelMainAnyFocus(mm)
+}
+
+func (m Model) handleMouseWheelMainAnyFocus(mm tea.MouseMsg) (tea.Model, tea.Cmd) {
 	delta := 3
 	if mm.Button == tea.MouseButtonWheelUp {
 		delta = -3
