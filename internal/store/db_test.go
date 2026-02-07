@@ -707,3 +707,138 @@ func TestRoomFeed_NewAndTopCursorPagination(t *testing.T) {
 		t.Fatalf("expected empty top page3, got %#v next=%v", top3, nextTop3)
 	}
 }
+
+func TestHomeFeed_NewAndTopCursorPagination(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "homefeed.db")
+
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	if err := st.Migrate(filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	u1, err := st.CreateUser(ctx, "seba", "fp1", "ssh-ed25519 AAAA...")
+	if err != nil {
+		t.Fatalf("CreateUser u1: %v", err)
+	}
+	u2, err := st.CreateUser(ctx, "kai", "fp2", "ssh-ed25519 AAAA...")
+	if err != nil {
+		t.Fatalf("CreateUser u2: %v", err)
+	}
+	u3, err := st.CreateUser(ctx, "mari", "fp3", "ssh-ed25519 AAAA...")
+	if err != nil {
+		t.Fatalf("CreateUser u3: %v", err)
+	}
+	u4, err := st.CreateUser(ctx, "dev42", "fp4", "ssh-ed25519 AAAA...")
+	if err != nil {
+		t.Fatalf("CreateUser u4: %v", err)
+	}
+
+	c, room, err := st.CreateCommunity(ctx, u1.ID, "rust", "All things Rust")
+	if err != nil {
+		t.Fatalf("CreateCommunity: %v", err)
+	}
+	if err := st.JoinCommunity(ctx, u2.ID, c.ID); err != nil {
+		t.Fatalf("JoinCommunity: %v", err)
+	}
+
+	now := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
+	entropy := ulid.Monotonic(rand.New(rand.NewSource(3)), 0)
+
+	idA := ulid.MustNew(ulid.Timestamp(now.Add(-10*time.Hour)), entropy).String()
+	idB := ulid.MustNew(ulid.Timestamp(now.Add(-2*time.Hour)), entropy).String()
+	idC := ulid.MustNew(ulid.Timestamp(now.Add(-30*time.Minute)), entropy).String()
+	idD := ulid.MustNew(ulid.Timestamp(now.Add(-5*time.Minute)), entropy).String()
+
+	for _, it := range []struct {
+		id      string
+		content string
+		created time.Time
+	}{
+		{id: idA, content: "a", created: now.Add(-10 * time.Hour)},
+		{id: idB, content: "b", created: now.Add(-2 * time.Hour)},
+		{id: idC, content: "c", created: now.Add(-30 * time.Minute)},
+		{id: idD, content: "d", created: now.Add(-5 * time.Minute)},
+	} {
+		if _, err := st.db.ExecContext(ctx, `
+			INSERT INTO messages (id, room_id, author_id, content, parent_id, upvote_count, reply_count, is_deleted, created_at)
+			VALUES (?, ?, ?, ?, NULL, 0, 0, 0, ?)
+		`, it.id, room.ID, u1.ID, it.content, it.created.Format(time.RFC3339Nano)); err != nil {
+			t.Fatalf("insert %s: %v", it.id, err)
+		}
+	}
+
+	// Upvotes: B=3, C=2, D=1, A=0.
+	for _, uid := range []string{u1.ID, u2.ID, u3.ID} {
+		if _, err := st.db.ExecContext(ctx, `INSERT INTO upvotes (user_id, message_id, created_at) VALUES (?, ?, ?)`, uid, idB, now.Format(time.RFC3339Nano)); err != nil {
+			t.Fatalf("upvote B: %v", err)
+		}
+	}
+	for _, uid := range []string{u1.ID, u2.ID} {
+		if _, err := st.db.ExecContext(ctx, `INSERT INTO upvotes (user_id, message_id, created_at) VALUES (?, ?, ?)`, uid, idC, now.Format(time.RFC3339Nano)); err != nil {
+			t.Fatalf("upvote C: %v", err)
+		}
+	}
+	if _, err := st.db.ExecContext(ctx, `INSERT INTO upvotes (user_id, message_id, created_at) VALUES (?, ?, ?)`, u4.ID, idD, now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("upvote D: %v", err)
+	}
+
+	// New pagination.
+	n1, nextNew, err := st.ListHomeNewPage(ctx, u2.ID, 2, nil)
+	if err != nil {
+		t.Fatalf("ListHomeNewPage: %v", err)
+	}
+	if len(n1) != 2 || n1[0].ID != idD || n1[1].ID != idC {
+		t.Fatalf("unexpected home new page1: %#v", n1)
+	}
+	n2, nextNew2, err := st.ListHomeNewPage(ctx, u2.ID, 2, nextNew)
+	if err != nil {
+		t.Fatalf("ListHomeNewPage #2: %v", err)
+	}
+	if len(n2) != 2 || n2[0].ID != idB || n2[1].ID != idA {
+		t.Fatalf("unexpected home new page2: %#v", n2)
+	}
+	if nextNew2 == nil {
+		t.Fatalf("expected next cursor on home new page2")
+	}
+	n3, nextNew3, err := st.ListHomeNewPage(ctx, u2.ID, 2, nextNew2)
+	if err != nil {
+		t.Fatalf("ListHomeNewPage #3: %v", err)
+	}
+	if len(n3) != 0 || nextNew3 != nil {
+		t.Fatalf("expected empty home new page3, got %#v next=%v", n3, nextNew3)
+	}
+
+	// Top pagination.
+	t1, nextTop, err := st.ListHomeTopPage(ctx, u2.ID, TopAll, 2, nil)
+	if err != nil {
+		t.Fatalf("ListHomeTopPage: %v", err)
+	}
+	if len(t1) != 2 || t1[0].ID != idB || t1[1].ID != idC {
+		t.Fatalf("unexpected home top page1: %#v", t1)
+	}
+	t2, nextTop2, err := st.ListHomeTopPage(ctx, u2.ID, TopAll, 2, nextTop)
+	if err != nil {
+		t.Fatalf("ListHomeTopPage #2: %v", err)
+	}
+	if len(t2) != 2 || t2[0].ID != idD || t2[1].ID != idA {
+		t.Fatalf("unexpected home top page2: %#v", t2)
+	}
+	if nextTop2 == nil {
+		t.Fatalf("expected next cursor on home top page2")
+	}
+	t3, nextTop3, err := st.ListHomeTopPage(ctx, u2.ID, TopAll, 2, nextTop2)
+	if err != nil {
+		t.Fatalf("ListHomeTopPage #3: %v", err)
+	}
+	if len(t3) != 0 || nextTop3 != nil {
+		t.Fatalf("expected empty home top page3, got %#v next=%v", t3, nextTop3)
+	}
+}

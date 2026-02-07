@@ -21,6 +21,192 @@ func (s *Store) ListHomeFeed(ctx context.Context, userID string, sortMode SortMo
 	}
 }
 
+func (s *Store) ListHomeNewPage(ctx context.Context, userID string, limit int, beforeID *string) ([]FeedMessage, *string, error) {
+	var args []any
+	args = append(args, userID)
+
+	q := `
+		SELECT
+			m.id, m.room_id, r.community_id, m.author_id, m.content, m.parent_id, m.upvote_count, m.reply_count, m.is_deleted, m.created_at,
+			u.username, c.name, r.name
+		FROM messages m
+		JOIN rooms r ON r.id = m.room_id
+		JOIN communities c ON c.id = r.community_id
+		JOIN memberships ms ON ms.community_id = c.id AND ms.user_id = ?
+		JOIN users u ON u.id = m.author_id
+		WHERE m.parent_id IS NULL
+	`
+	if beforeID != nil {
+		q += ` AND m.id < ?`
+		args = append(args, *beforeID)
+	}
+	q += ` ORDER BY m.id DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	items, err := scanFeedRows(rows)
+	if err != nil {
+		return nil, nil, err
+	}
+	var next *string
+	if len(items) == limit {
+		id := items[len(items)-1].ID
+		next = &id
+	}
+	return items, next, nil
+}
+
+type HomeTopCursor struct {
+	Upvotes int
+	ID      string
+}
+
+func (s *Store) ListHomeTopPage(ctx context.Context, userID string, topRange TopRange, limit int, before *HomeTopCursor) ([]FeedMessage, *HomeTopCursor, error) {
+	var since *time.Time
+	now := time.Now().UTC()
+	switch topRange {
+	case TopToday:
+		t := now.Add(-24 * time.Hour)
+		since = &t
+	case TopWeek:
+		t := now.Add(-7 * 24 * time.Hour)
+		since = &t
+	case TopMonth:
+		t := now.Add(-30 * 24 * time.Hour)
+		since = &t
+	case TopAll:
+		since = nil
+	default:
+		since = nil
+	}
+
+	q := `
+		SELECT
+			m.id, m.room_id, r.community_id, m.author_id, m.content, m.parent_id, m.upvote_count, m.reply_count, m.is_deleted, m.created_at,
+			u.username, c.name, r.name
+		FROM messages m
+		JOIN rooms r ON r.id = m.room_id
+		JOIN communities c ON c.id = r.community_id
+		JOIN memberships ms ON ms.community_id = c.id AND ms.user_id = ?
+		JOIN users u ON u.id = m.author_id
+		WHERE m.parent_id IS NULL
+	`
+	var args []any
+	args = append(args, userID)
+	if since != nil {
+		q += ` AND m.created_at >= ?`
+		args = append(args, since.Format(time.RFC3339Nano))
+	}
+	if before != nil {
+		q += ` AND (m.upvote_count < ? OR (m.upvote_count = ? AND m.id < ?))`
+		args = append(args, before.Upvotes, before.Upvotes, before.ID)
+	}
+	q += ` ORDER BY m.upvote_count DESC, m.id DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	items, err := scanFeedRows(rows)
+	if err != nil {
+		return nil, nil, err
+	}
+	var next *HomeTopCursor
+	if len(items) == limit {
+		last := items[len(items)-1]
+		next = &HomeTopCursor{Upvotes: last.Upvotes, ID: last.ID}
+	}
+	return items, next, nil
+}
+
+type HomeHotCursor struct {
+	Score float64
+	ID    string
+}
+
+func (s *Store) ListHomeHotPage(ctx context.Context, userID string, now time.Time, limit int, before *HomeHotCursor) ([]FeedMessage, *HomeHotCursor, error) {
+	// Hot score is computed in Go for portability. We fetch a candidate set and sort.
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT
+			m.id, m.room_id, r.community_id, m.author_id, m.content, m.parent_id, m.upvote_count, m.reply_count, m.is_deleted, m.created_at,
+			u.username, c.name, r.name
+		FROM messages m
+		JOIN rooms r ON r.id = m.room_id
+		JOIN communities c ON c.id = r.community_id
+		JOIN memberships ms ON ms.community_id = c.id AND ms.user_id = ?
+		JOIN users u ON u.id = m.author_id
+		WHERE m.parent_id IS NULL
+		ORDER BY m.id DESC
+		LIMIT 500
+	`, userID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	items, err := scanFeedRows(rows)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	type scored struct {
+		m     FeedMessage
+		score float64
+	}
+	scoredItems := make([]scored, 0, len(items))
+	for _, it := range items {
+		age := now.Sub(it.CreatedAt).Hours()
+		den := pow(age+2, 1.5)
+		score := 0.0
+		if den > 0 {
+			score = float64(it.Upvotes) / den
+		}
+		scoredItems = append(scoredItems, scored{m: it, score: score})
+	}
+
+	sort.SliceStable(scoredItems, func(i, j int) bool {
+		if scoredItems[i].score == scoredItems[j].score {
+			return scoredItems[i].m.ID > scoredItems[j].m.ID
+		}
+		return scoredItems[i].score > scoredItems[j].score
+	})
+
+	start := 0
+	if before != nil {
+		for i, s := range scoredItems {
+			if s.score < before.Score || (s.score == before.Score && s.m.ID < before.ID) {
+				start = i
+				break
+			}
+			start = len(scoredItems)
+		}
+	}
+	if start >= len(scoredItems) {
+		return nil, nil, nil
+	}
+
+	end := start + limit
+	if end > len(scoredItems) {
+		end = len(scoredItems)
+	}
+	out := make([]FeedMessage, 0, end-start)
+	for _, s := range scoredItems[start:end] {
+		out = append(out, s.m)
+	}
+
+	var next *HomeHotCursor
+	if len(out) == limit {
+		last := scoredItems[start+limit-1]
+		next = &HomeHotCursor{Score: last.score, ID: last.m.ID}
+	}
+	return out, next, nil
+}
+
 func (s *Store) listHomeNew(ctx context.Context, userID string, limit, offset int) ([]FeedMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
