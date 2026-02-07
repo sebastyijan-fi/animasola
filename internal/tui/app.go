@@ -40,6 +40,7 @@ type mainFocus int
 const (
 	mainNav mainFocus = iota
 	mainInput
+	mainSearch
 )
 
 type nav struct {
@@ -51,6 +52,7 @@ type nav struct {
 	feedSel      int
 	threadSel    int
 	homeSel      int
+	returnSearch bool
 }
 
 type createCommunityStep int
@@ -134,6 +136,16 @@ type Model struct {
 
 	input textinput.Model
 
+	searchOpen    bool
+	searchInput   textinput.Model
+	searchQuery   string
+	searchResults []store.SearchResult
+	searchSel     int
+	searchToken   int
+	searchLoading bool
+	searchErr     string
+	searchMatchID string
+
 	createStep  createCommunityStep
 	pendingName string
 
@@ -144,6 +156,11 @@ type Model struct {
 type feedSpinTickMsg struct{}
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+type searchDebounceMsg struct {
+	token int
+	q     string
+}
 
 type threadItem struct {
 	msg         store.FeedMessage
@@ -167,6 +184,11 @@ func NewApp(appName string, st Store, broker *pubsub.Broker[pubsub.Event], user 
 	ti.Width = 60
 	ti.Focus()
 
+	si := textinput.New()
+	si.Placeholder = "search"
+	si.CharLimit = 200
+	si.Width = 30
+
 	m := Model{
 		appName:           appName,
 		st:                st,
@@ -177,6 +199,7 @@ func NewApp(appName string, st Store, broker *pubsub.Broker[pubsub.Event], user 
 		sidebar:           components.SidebarModel{Focused: false},
 		v:                 viewHome,
 		input:             ti,
+		searchInput:       si,
 		homeSort:          store.SortHot,
 		homeTopRange:      store.TopWeek,
 		homeLoading:       true,
@@ -218,6 +241,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.input.Width = max(10, m.mainWidth()-2)
+		m.searchInput.Width = max(10, m.mainWidth()-len("Search: ")-2)
 		m.rebuildSidebarItems()
 		return m, nil
 	}
@@ -232,6 +256,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// async results
 	switch msg := msg.(type) {
+	case searchDebounceMsg:
+		// Only run the latest scheduled search.
+		if msg.token != m.searchToken {
+			return m, nil
+		}
+		if strings.TrimSpace(msg.q) == "" {
+			m.searchResults = nil
+			m.searchSel = 0
+			m.searchLoading = false
+			m.searchErr = ""
+			return m, nil
+		}
+		return m, m.cmdSearch(msg.q)
+	case searchLoadedMsg:
+		if msg.err != nil {
+			m.searchErr = "Something went wrong. Try again."
+			m.searchLoading = false
+			return m, nil
+		}
+		m.searchResults = msg.results
+		m.searchSel = clampIndex(m.searchSel, len(m.searchResults))
+		m.searchLoading = false
+		m.searchErr = ""
+		return m, nil
+	case openSearchResultMsg:
+		if msg.err != nil {
+			m.searchErr = "Something went wrong. Try again."
+			return m, nil
+		}
+		// Close the modal, open thread; stack remembers to restore search on Esc.
+		m.searchOpen = false
+		m.mainFocus = mainNav
+		m.searchInput.Blur()
+		m.searchMatchID = msg.matchID
+		prevV := m.v
+		m.v = viewThread
+		m.push(nav{v: prevV, roomID: msg.roomID, communityID: msg.communityID, returnSearch: true})
+		return m, tea.Batch(m.cmdLoadRoomContext(msg.communityID, msg.roomID), m.cmdLoadThread(msg.rootID))
 	case joinedLoadedMsg:
 		if msg.err != nil {
 			m.flashErr("Something went wrong. Try again.")
@@ -366,6 +428,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.threadSel >= len(m.threadItems) {
 			m.threadSel = max(0, len(m.threadItems)-1)
 		}
+		if m.searchMatchID != "" {
+			for i := range m.threadItems {
+				if m.threadItems[i].msg.ID == m.searchMatchID {
+					m.threadSel = i
+					break
+				}
+			}
+			m.searchMatchID = ""
+		}
 		if m.v == viewThread && m.curRoom != nil && len(msg.items) > 0 {
 			id := newestMessageID(msg.items)
 			return m, tea.Batch(m.cmdMarkRead(m.curRoom.ID, id), m.cmdLoadUnread())
@@ -463,6 +534,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// key handling depends on focus.
 	if km, ok := msg.(tea.KeyMsg); ok {
+		if m.mainFocus == mainSearch {
+			switch km.String() {
+			case "esc":
+				m.searchOpen = false
+				m.searchLoading = false
+				m.searchErr = ""
+				m.mainFocus = mainNav
+				m.searchInput.Blur()
+				return m, nil
+			case "up":
+				if m.searchSel > 0 {
+					m.searchSel--
+				}
+				return m, nil
+			case "down":
+				if m.searchSel < len(m.searchResults)-1 {
+					m.searchSel++
+				}
+				return m, nil
+			case "enter":
+				return m, m.cmdOpenSelectedSearchResult()
+			}
+
+			var cmd tea.Cmd
+			m.searchInput, cmd = m.searchInput.Update(km)
+			m.searchQuery = strings.TrimSpace(m.searchInput.Value())
+			m.searchToken++
+			token := m.searchToken
+			q := m.searchQuery
+			m.searchLoading = q != ""
+			return m, tea.Batch(cmd, tea.Tick(300*time.Millisecond, func(time.Time) tea.Msg {
+				return searchDebounceMsg{token: token, q: q}
+			}))
+		}
+
 		if m.deleteConfirm {
 			switch km.String() {
 			case "y":
@@ -564,6 +670,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return (&m).pop()
+		}
+
+		// Open search from anywhere when the main input isn't focused.
+		if km.Type == tea.KeyRunes && len(km.Runes) == 1 && km.Runes[0] == '/' && m.focus == focusMain && m.mainFocus == mainNav {
+			m.openSearch("")
+			return m, nil
 		}
 
 		if m.focus == focusSidebar {
@@ -872,18 +984,25 @@ func (m Model) View() string {
 	}
 
 	switch m.v {
-	case viewHome:
-		b.WriteString(m.viewHome())
-	case viewCommunities:
-		b.WriteString(m.viewJoined())
-	case viewExplore:
-		b.WriteString(m.viewExplore())
-	case viewCommunity:
-		b.WriteString(m.viewCommunity())
-	case viewRoom:
-		b.WriteString(m.viewRoom())
-	case viewThread:
-		b.WriteString(m.viewThread())
+	default:
+		if m.searchOpen {
+			b.WriteString(m.viewSearch())
+			break
+		}
+		switch m.v {
+		case viewHome:
+			b.WriteString(m.viewHome())
+		case viewCommunities:
+			b.WriteString(m.viewJoined())
+		case viewExplore:
+			b.WriteString(m.viewExplore())
+		case viewCommunity:
+			b.WriteString(m.viewCommunity())
+		case viewRoom:
+			b.WriteString(m.viewRoom())
+		case viewThread:
+			b.WriteString(m.viewThread())
+		}
 	}
 
 	b.WriteString("\n")
@@ -912,6 +1031,14 @@ func (m Model) View() string {
 func (m *Model) flashErr(s string) {
 	m.errMsg = s
 	m.errUntil = time.Now().Add(5 * time.Second)
+}
+
+func renderHighlightMarkers(s string) string {
+	// Store marks highlights with <hl>...</hl>. The current TUI doesn't do rich text,
+	// so we make highlights obvious using brackets.
+	s = strings.ReplaceAll(s, "<hl>", "[")
+	s = strings.ReplaceAll(s, "</hl>", "]")
+	return s
 }
 
 func (m Model) header() string {
@@ -1143,6 +1270,57 @@ func (m Model) viewThread() string {
 	return b.String()
 }
 
+func (m Model) viewSearch() string {
+	mw := m.mainWidth()
+	var b strings.Builder
+	b.WriteString("Search: ")
+	b.WriteString(m.searchInput.View())
+	b.WriteString("\n\n")
+
+	if m.searchErr != "" {
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(m.searchErr))
+		b.WriteString("\n\n")
+	}
+
+	if strings.TrimSpace(m.searchQuery) == "" {
+		b.WriteString("(type to search)\n")
+		return b.String()
+	}
+
+	if m.searchLoading {
+		b.WriteString(spinnerFrames[m.feedSpinIdx%len(spinnerFrames)])
+		b.WriteString("\n\n")
+	}
+
+	if len(m.searchResults) == 0 && !m.searchLoading {
+		b.WriteString("No results found\n")
+		return b.String()
+	}
+
+	for i, it := range m.searchResults {
+		sel := "  "
+		if i == m.searchSel {
+			sel = "> "
+		}
+		author := it.AuthorUsername
+		if it.IsDeleted {
+			author = "[deleted]"
+		}
+		content := it.HighlightedContent
+		if content == "" {
+			content = it.Content
+		}
+		if it.IsDeleted {
+			content = "[deleted]"
+		}
+		b.WriteString(fmt.Sprintf("%s%s · #%s · %s · %s\n", sel, it.CommunityName, it.RoomName, author, relTime(it.CreatedAt)))
+		b.WriteString(wrap(renderHighlightMarkers(content), max(20, mw-6)))
+		b.WriteString(fmt.Sprintf("\n(%d↑ %d💬)\n\n", it.Upvotes, it.Replies))
+	}
+	b.WriteString("Nav: up/down select, Enter open thread, Esc close search.\n")
+	return b.String()
+}
+
 func (m *Model) handleEnter() tea.Cmd {
 	line := strings.TrimSpace(m.input.Value())
 	if line == "" {
@@ -1199,11 +1377,20 @@ func (m *Model) handleCreateFlow(line string) tea.Cmd {
 func (m *Model) execCommand(cmd *Command) tea.Cmd {
 	switch cmd.Name {
 	case "help":
-		m.flashErr("Commands: /explore /join <community> /create-community")
+		m.flashErr("Commands: /explore /join <community> /create-community /search <query>")
 		return nil
 	case "explore":
 		m.v = viewExplore
 		return m.cmdLoadExplore()
+	case "search":
+		// /search <query...>
+		q := strings.TrimSpace(strings.Join(cmd.Args, " "))
+		m.openSearch(q)
+		if q == "" {
+			return nil
+		}
+		m.searchLoading = true
+		return m.cmdSearch(q)
 	case "create-community":
 		m.createStep = createName
 		m.pendingName = ""
@@ -1226,6 +1413,19 @@ func (m *Model) push(n nav) {
 	m.stack = append(m.stack, n)
 }
 
+func (m *Model) openSearch(initialQuery string) {
+	m.searchOpen = true
+	m.searchErr = ""
+	m.searchResults = nil
+	m.searchSel = 0
+	m.searchQuery = strings.TrimSpace(initialQuery)
+	m.searchInput.SetValue(m.searchQuery)
+	m.searchInput.Focus()
+	m.mainFocus = mainSearch
+	m.focus = focusMain
+	m.input.Blur()
+}
+
 func (m *Model) pop() (tea.Model, tea.Cmd) {
 	if len(m.stack) == 0 {
 		return *m, nil
@@ -1233,6 +1433,14 @@ func (m *Model) pop() (tea.Model, tea.Cmd) {
 	last := m.stack[len(m.stack)-1]
 	m.stack = m.stack[:len(m.stack)-1]
 	m.v = last.v
+	if last.returnSearch {
+		m.searchOpen = true
+		m.mainFocus = mainSearch
+		m.focus = focusMain
+		m.searchInput.Focus()
+		m.input.Blur()
+		return *m, nil
+	}
 	switch last.v {
 	case viewCommunities:
 		m.joinedSel = last.communitySel
@@ -1308,6 +1516,11 @@ type exploreLoadedMsg struct {
 	err         error
 }
 
+type searchLoadedMsg struct {
+	results []store.SearchResult
+	err     error
+}
+
 func (m Model) cmdLoadExplore() tea.Cmd {
 	userID := ""
 	if m.user != nil {
@@ -1329,6 +1542,19 @@ type homeLoadedMsg struct {
 	nextTop *store.HomeTopCursor
 	nextHot *store.HomeHotCursor
 	err     error
+}
+
+func (m Model) cmdSearch(q string) tea.Cmd {
+	userID := ""
+	if m.user != nil {
+		userID = m.user.ID
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		results, err := m.st.SearchMessages(ctx, userID, q, 50)
+		return searchLoadedMsg{results: results, err: err}
+	}
 }
 
 func (m Model) cmdLoadHomeReset() tea.Cmd {
@@ -1493,6 +1719,36 @@ func (m Model) cmdLoadFeedReset() tea.Cmd {
 			items, next, err := m.st.ListRoomTopLevelNewPage(ctx, roomID, 30, nil)
 			return feedLoadedMsg{items: items, append: false, hasMore: next != nil, nextNew: next, err: err}
 		}
+	}
+}
+
+type openSearchResultMsg struct {
+	rootID      string
+	roomID      string
+	communityID string
+	matchID     string
+	err         error
+}
+
+func (m Model) cmdOpenSelectedSearchResult() tea.Cmd {
+	if !m.searchOpen || m.searchSel < 0 || m.searchSel >= len(m.searchResults) {
+		return nil
+	}
+	sel := m.searchResults[m.searchSel]
+	matchID := sel.ID
+	roomID := sel.RoomID
+	communityID := sel.CommunityID
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		rootID, err := m.st.ResolveThreadRootID(ctx, matchID)
+		if err != nil {
+			return openSearchResultMsg{err: err}
+		}
+		if rootID == "" {
+			return openSearchResultMsg{err: store.ErrNotFound}
+		}
+		return openSearchResultMsg{rootID: rootID, roomID: roomID, communityID: communityID, matchID: matchID}
 	}
 }
 

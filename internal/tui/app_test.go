@@ -18,6 +18,10 @@ type fakeStore struct {
 	home    []store.FeedMessage
 
 	created []*store.Community
+
+	search    []store.SearchResult
+	thread    map[string][]store.FeedMessage
+	roomsByID map[string]store.Room
 }
 
 func (f *fakeStore) CreateCommunity(ctx context.Context, createdByUserID, name, description string) (*store.Community, *store.Room, error) {
@@ -86,7 +90,15 @@ func (f *fakeStore) ListHomeHotPage(ctx context.Context, userID string, now time
 func (f *fakeStore) ListRoomsByCommunity(ctx context.Context, communityID string) ([]store.Room, error) {
 	return f.rooms[communityID], nil
 }
-func (f *fakeStore) GetRoomByID(ctx context.Context, id string) (*store.Room, error) { return nil, nil }
+func (f *fakeStore) GetRoomByID(ctx context.Context, id string) (*store.Room, error) {
+	if f.roomsByID != nil {
+		if r, ok := f.roomsByID[id]; ok {
+			rr := r
+			return &rr, nil
+		}
+	}
+	return nil, nil
+}
 func (f *fakeStore) UpsertReadPosition(ctx context.Context, userID, roomID, lastReadMessageID string) error {
 	return nil
 }
@@ -126,13 +138,16 @@ func (f *fakeStore) ListRoomTopLevelHotPage(ctx context.Context, roomID string, 
 	return nil, nil, nil
 }
 func (f *fakeStore) SearchMessages(ctx context.Context, userID string, query string, limit int) ([]store.SearchResult, error) {
-	return nil, nil
+	return f.search, nil
 }
 func (f *fakeStore) ResolveThreadRootID(ctx context.Context, messageID string) (string, error) {
 	return messageID, nil
 }
 func (f *fakeStore) ListThread(ctx context.Context, rootMessageID string) ([]store.FeedMessage, error) {
-	return nil, nil
+	if f.thread == nil {
+		return nil, nil
+	}
+	return f.thread[rootMessageID], nil
 }
 func (f *fakeStore) CreateMessage(ctx context.Context, roomID, authorID, content string, parentID *string) (*store.Message, error) {
 	return &store.Message{ID: "m1"}, nil
@@ -393,5 +408,81 @@ func TestCtrlRRefreshesRoomFeed(t *testing.T) {
 	m = model.(Model)
 	if len(m.feed) != 1 || m.feed[0].ID != "m1" {
 		t.Fatalf("expected feed reloaded, got %#v", m.feed)
+	}
+}
+
+func TestSlashOpensSearchAndEscCloses(t *testing.T) {
+	fs := &fakeStore{}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	m.focus = focusMain
+	m.mainFocus = mainNav
+
+	model, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	m = model.(Model)
+	if !m.searchOpen || m.mainFocus != mainSearch {
+		t.Fatalf("expected search open and focused, got open=%v focus=%v", m.searchOpen, m.mainFocus)
+	}
+
+	model, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = model.(Model)
+	if m.searchOpen || m.mainFocus != mainNav {
+		t.Fatalf("expected search closed and nav focus, got open=%v focus=%v", m.searchOpen, m.mainFocus)
+	}
+}
+
+func TestSearchEnterOpensThreadAndEscRestoresSearch(t *testing.T) {
+	fs := &fakeStore{
+		joined: []store.Community{{ID: "c1", Name: "rust"}},
+		roomsByID: map[string]store.Room{
+			"r1": {ID: "r1", Name: "general", CommunityID: "c1"},
+		},
+		search: []store.SearchResult{
+			{
+				FeedMessage: store.FeedMessage{
+					Message:        store.Message{ID: "m2", RoomID: "r1"},
+					AuthorUsername: "a",
+					CommunityID:    "c1",
+					CommunityName:  "rust",
+					RoomName:       "general",
+				},
+				HighlightedContent: "<hl>tokio</hl> is neat",
+			},
+		},
+		thread: map[string][]store.FeedMessage{
+			"m2": {
+				{Message: store.Message{ID: "m2", RoomID: "r1"}, AuthorUsername: "a"},
+			},
+		},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	m.focus = focusMain
+	m.mainFocus = mainNav
+
+	// Open search and load results.
+	m.openSearch("tokio")
+	model := applyCmd(t, m, m.cmdSearch("tokio"))
+	m = model.(Model)
+	if len(m.searchResults) != 1 {
+		t.Fatalf("expected 1 search result")
+	}
+
+	// Enter should open thread.
+	model, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatalf("expected open-selected cmd")
+	}
+	model = applyCmd(t, model, cmd)
+	m = model.(Model)
+	if m.v != viewThread {
+		t.Fatalf("expected thread view, got %v", m.v)
+	}
+
+	// Esc should restore search.
+	model, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = model.(Model)
+	if !m.searchOpen || m.mainFocus != mainSearch {
+		t.Fatalf("expected search restored after esc, got open=%v focus=%v", m.searchOpen, m.mainFocus)
 	}
 }
