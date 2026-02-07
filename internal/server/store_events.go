@@ -63,6 +63,14 @@ func (s *storeWithEvents) ListHomeHotPage(ctx context.Context, userID string, no
 	return s.st.ListHomeHotPage(ctx, userID, now, limit, before)
 }
 
+func (s *storeWithEvents) SearchMessages(ctx context.Context, userID string, query string, limit int) ([]store.SearchResult, error) {
+	return s.st.SearchMessages(ctx, userID, query, limit)
+}
+
+func (s *storeWithEvents) ResolveThreadRootID(ctx context.Context, messageID string) (string, error) {
+	return s.st.ResolveThreadRootID(ctx, messageID)
+}
+
 func (s *storeWithEvents) ListRoomsByCommunity(ctx context.Context, communityID string) ([]store.Room, error) {
 	return s.st.ListRoomsByCommunity(ctx, communityID)
 }

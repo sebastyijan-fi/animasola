@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"math/rand"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -840,5 +841,114 @@ func TestHomeFeed_NewAndTopCursorPagination(t *testing.T) {
 	}
 	if len(t3) != 0 || nextTop3 != nil {
 		t.Fatalf("expected empty home top page3, got %#v next=%v", t3, nextTop3)
+	}
+}
+
+func TestSearchMessages_ScopedToMembershipAndHighlights(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "search.db")
+
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	if err := st.Migrate(filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	u1, err := st.CreateUser(ctx, "seba", "fp1", "ssh-ed25519 AAAA...")
+	if err != nil {
+		t.Fatalf("CreateUser u1: %v", err)
+	}
+	u2, err := st.CreateUser(ctx, "kai", "fp2", "ssh-ed25519 AAAA...")
+	if err != nil {
+		t.Fatalf("CreateUser u2: %v", err)
+	}
+
+	c1, r1, err := st.CreateCommunity(ctx, u1.ID, "rust", "All things Rust")
+	if err != nil {
+		t.Fatalf("CreateCommunity c1: %v", err)
+	}
+	_, r2, err := st.CreateCommunity(ctx, u1.ID, "linux", "Penguins unite")
+	if err != nil {
+		t.Fatalf("CreateCommunity c2: %v", err)
+	}
+	if err := st.JoinCommunity(ctx, u2.ID, c1.ID); err != nil {
+		t.Fatalf("JoinCommunity c1: %v", err)
+	}
+	// u2 is not a member of c2.
+
+	_, err = st.CreateMessage(ctx, r1.ID, u1.ID, "tokio io_uring deep dive", nil)
+	if err != nil {
+		t.Fatalf("CreateMessage r1: %v", err)
+	}
+	_, err = st.CreateMessage(ctx, r2.ID, u1.ID, "tokio io_uring is also cool here", nil)
+	if err != nil {
+		t.Fatalf("CreateMessage r2: %v", err)
+	}
+
+	results, err := st.SearchMessages(ctx, u2.ID, "tokio", 50)
+	if err != nil {
+		t.Fatalf("SearchMessages: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 scoped result, got %d: %#v", len(results), results)
+	}
+	if results[0].CommunityID != c1.ID {
+		t.Fatalf("expected result in community %s, got %s", c1.ID, results[0].CommunityID)
+	}
+	if !strings.Contains(results[0].HighlightedContent, "<hl>") || !strings.Contains(results[0].HighlightedContent, "</hl>") {
+		t.Fatalf("expected highlight markers in %q", results[0].HighlightedContent)
+	}
+}
+
+func TestResolveThreadRootID(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "root.db")
+
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	if err := st.Migrate(filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	u1, err := st.CreateUser(ctx, "seba", "fp1", "ssh-ed25519 AAAA...")
+	if err != nil {
+		t.Fatalf("CreateUser u1: %v", err)
+	}
+	u2, err := st.CreateUser(ctx, "kai", "fp2", "ssh-ed25519 AAAA...")
+	if err != nil {
+		t.Fatalf("CreateUser u2: %v", err)
+	}
+	_, room, err := st.CreateCommunity(ctx, u1.ID, "rust", "All things Rust")
+	if err != nil {
+		t.Fatalf("CreateCommunity: %v", err)
+	}
+
+	root, err := st.CreateMessage(ctx, room.ID, u1.ID, "root", nil)
+	if err != nil {
+		t.Fatalf("CreateMessage root: %v", err)
+	}
+	reply, err := st.CreateMessage(ctx, room.ID, u2.ID, "reply", &root.ID)
+	if err != nil {
+		t.Fatalf("CreateMessage reply: %v", err)
+	}
+
+	got, err := st.ResolveThreadRootID(ctx, reply.ID)
+	if err != nil {
+		t.Fatalf("ResolveThreadRootID: %v", err)
+	}
+	if got != root.ID {
+		t.Fatalf("expected %q, got %q", root.ID, got)
 	}
 }

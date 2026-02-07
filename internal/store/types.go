@@ -39,6 +39,11 @@ type FeedMessage struct {
 	RoomName       string
 }
 
+type SearchResult struct {
+	FeedMessage
+	HighlightedContent string
+}
+
 type SortMode string
 
 const (

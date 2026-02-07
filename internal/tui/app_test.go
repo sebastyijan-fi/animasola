@@ -125,6 +125,12 @@ func (f *fakeStore) ListRoomTopLevelTopPage(ctx context.Context, roomID string, 
 func (f *fakeStore) ListRoomTopLevelHotPage(ctx context.Context, roomID string, now time.Time, limit int, before *store.RoomHotCursor) ([]store.FeedMessage, *store.RoomHotCursor, error) {
 	return nil, nil, nil
 }
+func (f *fakeStore) SearchMessages(ctx context.Context, userID string, query string, limit int) ([]store.SearchResult, error) {
+	return nil, nil
+}
+func (f *fakeStore) ResolveThreadRootID(ctx context.Context, messageID string) (string, error) {
+	return messageID, nil
+}
 func (f *fakeStore) ListThread(ctx context.Context, rootMessageID string) ([]store.FeedMessage, error) {
 	return nil, nil
 }
