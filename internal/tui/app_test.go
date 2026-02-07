@@ -519,6 +519,64 @@ func TestRoomsCommandNavigatesToCommunityView(t *testing.T) {
 	}
 }
 
+func TestCommandAutocompleteTabCompletesCommand(t *testing.T) {
+	fs := &fakeStore{
+		joined:  []store.Community{{ID: "c1", Name: "rust"}},
+		explore: []store.Community{{ID: "c2", Name: "linux"}},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = model.(Model)
+	model = applyCmd(t, m, m.cmdLoadJoined())
+	m = model.(Model)
+
+	m.focus = focusMain
+	m.mainFocus = mainInput
+	m.input.Focus()
+	m.input.SetValue("/j")
+	m.updateCmdSuggest()
+	if !m.cmdSuggestOpen {
+		t.Fatalf("expected cmdSuggestOpen")
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	if got := m.input.Value(); got != "/join " {
+		t.Fatalf("expected /join , got %q", got)
+	}
+	if m.focus != focusMain || m.mainFocus != mainInput {
+		t.Fatalf("expected to stay in input focus")
+	}
+}
+
+func TestCommandAutocompleteCompletesArgFromJoined(t *testing.T) {
+	fs := &fakeStore{
+		joined: []store.Community{{ID: "c1", Name: "rust"}},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = model.(Model)
+	model = applyCmd(t, m, m.cmdLoadJoined())
+	m = model.(Model)
+
+	m.focus = focusMain
+	m.mainFocus = mainInput
+	m.input.Focus()
+	m.input.SetValue("/leave r")
+	m.updateCmdSuggest()
+	if !m.cmdSuggestOpen {
+		t.Fatalf("expected cmdSuggestOpen")
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	if got := m.input.Value(); got != "/leave rust" {
+		t.Fatalf("expected /leave rust, got %q", got)
+	}
+}
+
 func TestHomeFeedPaginationLoadsMoreAtBottom(t *testing.T) {
 	fs := &fakeStore{
 		joined: []store.Community{{ID: "c1", Name: "rust"}},

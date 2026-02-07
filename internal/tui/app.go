@@ -140,6 +140,10 @@ type Model struct {
 
 	input textinput.Model
 
+	cmdSuggestOpen bool
+	cmdSuggestSel  int
+	cmdSuggest     []cmdSuggestion
+
 	searchOpen    bool
 	searchInput   textinput.Model
 	searchQuery   string
@@ -171,6 +175,11 @@ type threadItem struct {
 	msg         store.FeedMessage
 	treePrefix  string
 	overflowCtx string
+}
+
+type cmdSuggestion struct {
+	Text       string
+	ExpectsArg bool
 }
 
 func isShortcutRune(r rune) bool {
@@ -719,6 +728,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "tab":
+			// Command autocomplete: when typing a command, Tab completes the current suggestion.
+			// To switch focus while typing, press Esc to return to nav mode, then Tab.
+			if m.focus == focusMain && m.mainFocus == mainInput && m.cmdSuggestOpen && len(m.cmdSuggest) > 0 {
+				s := m.cmdSuggest[clampIndex(m.cmdSuggestSel, len(m.cmdSuggest))]
+				val := s.Text
+				if s.ExpectsArg && !strings.HasSuffix(val, " ") {
+					val += " "
+				}
+				m.input.SetValue(val)
+				m.updateCmdSuggest()
+				return m, nil
+			}
 			if m.sidebarVisible() {
 				if m.focus == focusMain {
 					m.focus = focusSidebar
@@ -737,6 +758,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focus == focusMain && m.mainFocus == mainInput {
 				m.mainFocus = mainNav
 				m.input.Blur()
+				m.clearCmdSuggest()
 				return m, nil
 			}
 			return (&m).pop()
@@ -1021,6 +1043,20 @@ input:
 
 	// Don't feed navigation keys into the input.
 	if km, ok := msg.(tea.KeyMsg); ok {
+		if m.cmdSuggestOpen && len(m.cmdSuggest) > 0 {
+			switch km.String() {
+			case "up":
+				if m.cmdSuggestSel > 0 {
+					m.cmdSuggestSel--
+				}
+				return m, nil
+			case "down":
+				if m.cmdSuggestSel < len(m.cmdSuggest)-1 {
+					m.cmdSuggestSel++
+				}
+				return m, nil
+			}
+		}
 		switch km.String() {
 		case "up", "down", "left", "right", "pgup", "pgdown", "home", "end":
 			return m, nil
@@ -1029,6 +1065,7 @@ input:
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
+	m.updateCmdSuggest()
 	if km, ok := msg.(tea.KeyMsg); ok && km.String() == "enter" {
 		cmd2 := (&m).handleEnter()
 		// Stay in input mode.
@@ -1051,6 +1088,9 @@ func (m Model) View() string {
 	if m.errMsg != "" && time.Now().Before(m.errUntil) {
 		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("1")).Render(m.errMsg))
 		b.WriteString("\n\n")
+	}
+	if m.focus == focusMain && m.mainFocus == mainInput && !m.searchOpen {
+		b.WriteString(m.viewCmdSuggest())
 	}
 
 	switch m.v {
@@ -1101,6 +1141,127 @@ func (m Model) View() string {
 func (m *Model) flashErr(s string) {
 	m.errMsg = s
 	m.errUntil = time.Now().Add(5 * time.Second)
+}
+
+func (m *Model) clearCmdSuggest() {
+	m.cmdSuggestOpen = false
+	m.cmdSuggestSel = 0
+	m.cmdSuggest = nil
+}
+
+func (m *Model) updateCmdSuggest() {
+	if m.createStep != createNone {
+		m.clearCmdSuggest()
+		return
+	}
+	if m.focus != focusMain || m.mainFocus != mainInput || m.searchOpen {
+		m.clearCmdSuggest()
+		return
+	}
+
+	raw := strings.TrimSpace(m.input.Value())
+	if raw == "" || !strings.HasPrefix(raw, "/") {
+		m.clearCmdSuggest()
+		return
+	}
+
+	// Only support single-line command completion.
+	if strings.Contains(raw, "\n") {
+		m.clearCmdSuggest()
+		return
+	}
+
+	type cmdSpec struct {
+		Name       string
+		ExpectsArg bool
+	}
+	specs := []cmdSpec{
+		{Name: "help"},
+		{Name: "explore"},
+		{Name: "join", ExpectsArg: true},
+		{Name: "leave", ExpectsArg: true},
+		{Name: "create-community"},
+		{Name: "create-room", ExpectsArg: true},
+		{Name: "rooms"},
+		{Name: "search", ExpectsArg: true},
+		{Name: "quit"},
+		{Name: "q"},
+	}
+
+	parts := strings.SplitN(raw, " ", 2)
+	cmdPart := strings.TrimPrefix(parts[0], "/")
+	cmdLower := strings.ToLower(cmdPart)
+
+	var out []cmdSuggestion
+	if len(parts) == 1 {
+		for _, s := range specs {
+			if strings.HasPrefix(s.Name, cmdLower) {
+				out = append(out, cmdSuggestion{Text: "/" + s.Name, ExpectsArg: s.ExpectsArg})
+			}
+		}
+	} else {
+		argPrefix := strings.ToLower(strings.TrimSpace(parts[1]))
+		switch cmdLower {
+		case "join":
+			seen := make(map[string]bool, len(m.expl)+len(m.joined))
+			for _, c := range m.expl {
+				seen[c.Name] = true
+				if strings.HasPrefix(c.Name, argPrefix) {
+					out = append(out, cmdSuggestion{Text: "/join " + c.Name})
+				}
+			}
+			// If explore isn't loaded, fall back to joined list for completion.
+			if len(m.expl) == 0 {
+				for _, c := range m.joined {
+					if seen[c.Name] {
+						continue
+					}
+					if strings.HasPrefix(c.Name, argPrefix) {
+						out = append(out, cmdSuggestion{Text: "/join " + c.Name})
+					}
+				}
+			}
+		case "leave":
+			for _, c := range m.joined {
+				if strings.HasPrefix(c.Name, argPrefix) {
+					out = append(out, cmdSuggestion{Text: "/leave " + c.Name})
+				}
+			}
+		}
+	}
+
+	if len(out) > 5 {
+		out = out[:5]
+	}
+	if len(out) == 0 {
+		m.clearCmdSuggest()
+		return
+	}
+	m.cmdSuggestOpen = true
+	m.cmdSuggest = out
+	m.cmdSuggestSel = clampIndex(m.cmdSuggestSel, len(m.cmdSuggest))
+}
+
+func (m Model) viewCmdSuggest() string {
+	if !m.cmdSuggestOpen || len(m.cmdSuggest) == 0 {
+		return ""
+	}
+	selStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	var b strings.Builder
+	for i, s := range m.cmdSuggest {
+		line := s.Text
+		if s.ExpectsArg && !strings.HasSuffix(line, " ") {
+			line += " "
+		}
+		prefix := "  "
+		if i == m.cmdSuggestSel {
+			prefix = "> "
+			line = selStyle.Render(line)
+		}
+		b.WriteString(prefix + line + "\n")
+	}
+	b.WriteString("\n")
+	return b.String()
 }
 
 func renderHighlightMarkers(s string) string {
@@ -1413,6 +1574,7 @@ func (m *Model) handleEnter() tea.Cmd {
 	if line == "" {
 		return nil
 	}
+	m.clearCmdSuggest()
 
 	if m.createStep != createNone {
 		return m.handleCreateFlow(line)
@@ -1583,6 +1745,10 @@ func (m Model) contentStartY() int {
 		// err line + blank line
 		y += 2
 	}
+	if m.cmdSuggestOpen && m.focus == focusMain && m.mainFocus == mainInput && !m.searchOpen && len(m.cmdSuggest) > 0 {
+		// suggestions block + blank line
+		y += len(m.cmdSuggest) + 1
+	}
 	return y
 }
 
@@ -1590,6 +1756,7 @@ func (m *Model) focusInput() {
 	m.focus = focusMain
 	m.mainFocus = mainInput
 	m.input.Focus()
+	m.updateCmdSuggest()
 	m.searchOpen = false
 	m.searchInput.Blur()
 }
