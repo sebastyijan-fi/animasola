@@ -28,6 +28,7 @@ const (
 	viewThread
 	viewProfile
 	viewMembers
+	viewMentions
 )
 
 type focus int
@@ -96,6 +97,7 @@ type Model struct {
 
 	curCommunity *store.Community
 	curRoom      *store.Room
+	pinned       *store.FeedMessage
 	feed         []store.FeedMessage
 	feedSel      int
 	feedSort     store.SortMode
@@ -136,6 +138,9 @@ type Model struct {
 	members    []string
 	membersSel int
 
+	mentions    []store.FeedMessage
+	mentionsSel int
+
 	replyToID       *string
 	replyToUsername string
 
@@ -145,6 +150,14 @@ type Model struct {
 	leaveConfirm     bool
 	leaveCommunityID string
 	leaveCommunity   string
+
+	deleteRoomConfirm bool
+	deleteRoomID      string
+	deleteRoomName    string
+
+	deleteCommunityConfirm bool
+	deleteCommunityID      string
+	deleteCommunityName    string
 
 	input textinput.Model
 
@@ -325,6 +338,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.v = viewThread
 		m.push(nav{v: prevV, roomID: msg.roomID, communityID: msg.communityID, returnSearch: true})
 		return m, tea.Batch(m.cmdLoadRoomContext(msg.communityID, msg.roomID), m.cmdLoadThread(msg.rootID))
+	case openMentionMsg:
+		if msg.err != nil {
+			m.flashErr("Something went wrong. Try again.")
+			return m, nil
+		}
+		prevV := m.v
+		m.v = viewThread
+		m.push(nav{v: prevV})
+		return m, tea.Batch(m.cmdLoadRoomContext(msg.communityID, msg.roomID), m.cmdLoadThread(msg.rootID))
 	case joinedLoadedMsg:
 		if msg.err != nil {
 			m.flashErr("Something went wrong. Try again.")
@@ -394,7 +416,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.room != nil {
 			m.curRoom = msg.room
 		}
-		return m, nil
+		return m, m.cmdLoadPinned()
 	case openCommunityMsg:
 		if msg.err != nil {
 			m.flashErr("Something went wrong. Try again.")
@@ -417,7 +439,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.focus = focusMain
 			m.mainFocus = mainInput
 			m.input.Focus()
-			return m, tea.Batch(m.cmdLoadFeedReset(), m.cmdLoadUnread())
+			return m, tea.Batch(m.cmdLoadPinned(), m.cmdLoadFeedReset(), m.cmdLoadUnread())
 		}
 		m.v = viewCommunity
 		return m, m.cmdLoadUnread()
@@ -556,6 +578,58 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.replyToUsername = ""
 		m.homeLoading = true
 		return m, tea.Batch(m.cmdLoadJoined(), m.cmdLoadUnread(), m.cmdLoadHomeReset())
+	case pinnedLoadedMsg:
+		if msg.err != nil {
+			m.flashErr("Something went wrong. Try again.")
+			return m, nil
+		}
+		m.pinned = msg.msg
+		return m, nil
+	case roomDeletedMsg:
+		if msg.err != nil {
+			m.flashErr("Could not delete room.")
+			return m, nil
+		}
+		// If we were in that room, go back to community view.
+		if m.curRoom != nil && m.curRoom.ID == msg.roomID {
+			m.v = viewCommunity
+			m.curRoom = nil
+			m.pinned = nil
+			return m, m.cmdLoadRooms(msg.communityID)
+		}
+		return m, m.cmdLoadRooms(msg.communityID)
+	case communityDeletedMsg:
+		if msg.err != nil {
+			m.flashErr("Could not delete community.")
+			return m, nil
+		}
+		m.v = viewHome
+		m.curCommunity = nil
+		m.curRoom = nil
+		m.pinned = nil
+		m.profile = nil
+		m.members = nil
+		m.mentions = nil
+		m.homeLoading = true
+		return m, tea.Batch(m.cmdLoadJoined(), m.cmdLoadUnread(), m.cmdLoadHomeReset())
+	case mentionsLoadedMsg:
+		if msg.err != nil {
+			m.flashErr("Something went wrong. Try again.")
+			return m, nil
+		}
+		m.mentions = msg.items
+		m.mentionsSel = clampIndex(m.mentionsSel, len(m.mentions))
+		return m, nil
+	case deleteRoomResolvedMsg:
+		if msg.err != nil || msg.room == nil {
+			m.flashErr("Room not found.")
+			return m, nil
+		}
+		m.deleteRoomConfirm = true
+		m.deleteRoomID = msg.room.ID
+		m.deleteRoomName = msg.room.Name
+		m.flashErr(fmt.Sprintf("Delete #%s and all messages? (y/n)", msg.room.Name))
+		return m, nil
 	case postedMsg:
 		if msg.err != nil {
 			m.flashErr("Could not post.")
@@ -590,10 +664,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.cmdLoadThread(m.threadRootID)
 		case viewRoom:
 			m.feedLoading = true
-			return m, m.cmdLoadFeedReset()
+			return m, tea.Batch(m.cmdLoadPinned(), m.cmdLoadFeedReset())
 		default:
 			return m, nil
 		}
+	case pinnedSetMsg:
+		if msg.err != nil {
+			m.flashErr("Something went wrong. Try again.")
+			return m, nil
+		}
+		return m, m.cmdLoadPinned()
 	}
 
 	if em, ok := msg.(eventMsg); ok {
@@ -696,6 +776,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		if m.deleteRoomConfirm {
+			switch km.String() {
+			case "y":
+				m.deleteRoomConfirm = false
+				rid := m.deleteRoomID
+				m.deleteRoomID = ""
+				m.deleteRoomName = ""
+				return m, m.cmdDeleteRoom(rid)
+			case "n", "esc":
+				m.deleteRoomConfirm = false
+				m.deleteRoomID = ""
+				m.deleteRoomName = ""
+				return m, nil
+			default:
+				return m, nil
+			}
+		}
+
 		switch km.String() {
 		case "ctrl+c":
 			if m.cancel != nil {
@@ -791,6 +889,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.mainFocus = mainNav
 				m.input.Blur()
 				m.clearCmdSuggest()
+				m.deleteCommunityConfirm = false
+				m.deleteCommunityID = ""
+				m.deleteCommunityName = ""
 				return m, nil
 			}
 			return (&m).pop()
@@ -1115,6 +1216,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.push(nav{v: prev})
 				return m, m.cmdLoadProfile(u)
 			}
+		case viewMentions:
+			switch km.String() {
+			case "up":
+				if m.mentionsSel > 0 {
+					m.mentionsSel--
+				}
+				return m, nil
+			case "down":
+				if m.mentionsSel < len(m.mentions)-1 {
+					m.mentionsSel++
+				}
+				return m, nil
+			case "enter":
+				if m.mainFocus != mainNav {
+					goto input
+				}
+				return m, m.cmdOpenSelectedMention()
+			}
 		}
 	}
 
@@ -1199,6 +1318,8 @@ func (m Model) View() string {
 			b.WriteString(m.viewProfile())
 		case viewMembers:
 			b.WriteString(m.viewMembers())
+		case viewMentions:
+			b.WriteString(m.viewMentions())
 		}
 	}
 
@@ -1270,6 +1391,14 @@ func (m *Model) updateCmdSuggest() {
 		{Name: "create-community"},
 		{Name: "create-room", ExpectsArg: true},
 		{Name: "rooms"},
+		{Name: "members"},
+		{Name: "mentions"},
+		{Name: "me"},
+		{Name: "user", ExpectsArg: true},
+		{Name: "pin"},
+		{Name: "unpin"},
+		{Name: "delete-room", ExpectsArg: true},
+		{Name: "delete-community"},
 		{Name: "search", ExpectsArg: true},
 		{Name: "quit"},
 		{Name: "q"},
@@ -1414,6 +1543,8 @@ func (m Model) header() string {
 		} else {
 			loc = "members"
 		}
+	case viewMentions:
+		loc = "mentions"
 	}
 
 	title := lipgloss.NewStyle().Bold(true).Render(m.appName)
@@ -1542,6 +1673,19 @@ func (m Model) viewRoom() string {
 		b.WriteString(fmt.Sprintf(" · %s", m.feedTopRange))
 	}
 	b.WriteString("\n\n")
+	if m.pinned != nil {
+		author := m.pinned.AuthorUsername
+		content := m.pinned.Content
+		if m.pinned.IsDeleted {
+			author = "[deleted]"
+			content = "[deleted]"
+		}
+		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")).Render("PINNED"))
+		b.WriteString("\n")
+		b.WriteString(fmt.Sprintf("%s · %s  (%d↑ %d💬)\n", author, relTime(m.pinned.CreatedAt), m.pinned.Upvotes, m.pinned.Replies))
+		b.WriteString(wrap(content, max(20, mw-6)))
+		b.WriteString("\n\n")
+	}
 	if m.feedPending > 0 && m.feedSort != store.SortNew {
 		b.WriteString(fmt.Sprintf("%d new posts  (new sort auto-refreshes)\n\n", m.feedPending))
 	}
@@ -1730,6 +1874,35 @@ func (m Model) viewMembers() string {
 	return b.String()
 }
 
+func (m Model) viewMentions() string {
+	mw := m.mainWidth()
+	var b strings.Builder
+	b.WriteString("Mentions\n\n")
+	if len(m.mentions) == 0 {
+		b.WriteString("(none)\n")
+		return b.String()
+	}
+	for i, it := range m.mentions {
+		sel := "  "
+		if i == m.mentionsSel {
+			sel = "> "
+		}
+		author := it.AuthorUsername
+		if it.IsDeleted {
+			author = "[deleted]"
+		}
+		content := it.Content
+		if it.IsDeleted {
+			content = "[deleted]"
+		}
+		b.WriteString(fmt.Sprintf("%s%s · #%s · %s · %s\n", sel, it.CommunityName, it.RoomName, author, relTime(it.CreatedAt)))
+		b.WriteString(wrap(content, max(20, mw-6)))
+		b.WriteString(fmt.Sprintf("\n(%d↑ %d💬)\n\n", it.Upvotes, it.Replies))
+	}
+	b.WriteString("Enter opens thread. Esc goes back.\n")
+	return b.String()
+}
+
 func (m *Model) handleEnter() tea.Cmd {
 	line := strings.TrimSpace(m.input.Value())
 	if line == "" {
@@ -1739,6 +1912,22 @@ func (m *Model) handleEnter() tea.Cmd {
 
 	if m.createStep != createNone {
 		return m.handleCreateFlow(line)
+	}
+
+	if m.deleteCommunityConfirm {
+		// Double-confirm: user must type the community name exactly (case-insensitive).
+		expected := m.deleteCommunityName
+		cid := m.deleteCommunityID
+		m.deleteCommunityConfirm = false
+		m.deleteCommunityID = ""
+		m.deleteCommunityName = ""
+		m.input.SetValue("")
+		m.input.Placeholder = "/help"
+		if strings.EqualFold(strings.TrimSpace(line), expected) {
+			return m.cmdDeleteCommunity(cid)
+		}
+		m.flashErr("Delete canceled.")
+		return nil
 	}
 
 	if cmd := ParseCommand(line); cmd != nil {
@@ -1787,7 +1976,7 @@ func (m *Model) handleCreateFlow(line string) tea.Cmd {
 func (m *Model) execCommand(cmd *Command) tea.Cmd {
 	switch strings.ToLower(cmd.Name) {
 	case "help":
-		m.flashErr("Commands: /explore /join <community> /leave <community> /create-community /create-room <name> /rooms /search <query> /quit (/q)")
+		m.flashErr("Commands: /explore /join <community> /leave <community> /create-community /create-room <name> /rooms /members /mentions /me /user <name> /pin /unpin /delete-room <name> /delete-community /search <query> /quit (/q)")
 		return nil
 	case "explore":
 		m.v = viewExplore
@@ -1877,6 +2066,20 @@ func (m *Model) execCommand(cmd *Command) tea.Cmd {
 		}
 		// TODO(phase 6): enforce admin role.
 		return m.cmdCreateRoom(m.curCommunity.ID, name)
+	case "mentions":
+		if m.user == nil {
+			m.flashErr("Not authenticated.")
+			return nil
+		}
+		prev := m.v
+		m.v = viewMentions
+		m.mentions = nil
+		m.mentionsSel = 0
+		m.push(nav{v: prev})
+		m.focus = focusMain
+		m.mainFocus = mainNav
+		m.input.Blur()
+		return m.cmdLoadMentions()
 	case "me":
 		if m.user == nil {
 			m.flashErr("Not authenticated.")
@@ -1899,6 +2102,50 @@ func (m *Model) execCommand(cmd *Command) tea.Cmd {
 		m.profileSel = 0
 		m.push(nav{v: prev})
 		return m.cmdLoadProfile(cmd.Args[0])
+	case "pin":
+		if m.curRoom == nil {
+			m.flashErr("No room selected.")
+			return nil
+		}
+		// TODO(phase 6): enforce admin role.
+		id := m.selectedMessageID()
+		if id == "" {
+			m.flashErr("No message selected.")
+			return nil
+		}
+		return m.cmdPin(m.curRoom.ID, id)
+	case "unpin":
+		if m.curRoom == nil {
+			m.flashErr("No room selected.")
+			return nil
+		}
+		// TODO(phase 6): enforce admin role.
+		return m.cmdUnpin(m.curRoom.ID)
+	case "delete-room":
+		if len(cmd.Args) != 1 {
+			m.flashErr("Usage: /delete-room name")
+			return nil
+		}
+		if m.curCommunity == nil {
+			m.flashErr("No community selected.")
+			return nil
+		}
+		// TODO(phase 6): enforce admin role.
+		name := strings.TrimPrefix(cmd.Args[0], "#")
+		return m.cmdResolveRoomForDelete(m.curCommunity.ID, name)
+	case "delete-community":
+		if m.curCommunity == nil {
+			m.flashErr("No community selected.")
+			return nil
+		}
+		// TODO(phase 6): enforce admin role.
+		m.deleteCommunityConfirm = true
+		m.deleteCommunityID = m.curCommunity.ID
+		m.deleteCommunityName = m.curCommunity.Name
+		m.input.SetValue("")
+		m.input.Placeholder = "type community name to confirm"
+		m.flashErr(fmt.Sprintf("Type %q to confirm community deletion.", m.curCommunity.Name))
+		return nil
 	case "quit", "q":
 		if m.cancel != nil {
 			m.cancel()
@@ -2565,6 +2812,141 @@ func (m Model) cmdLoadMembers(communityID string) tea.Cmd {
 		defer cancel()
 		ms, err := m.st.ListCommunityMembers(ctx, communityID, 100)
 		return membersLoadedMsg{communityID: communityID, members: ms, err: err}
+	}
+}
+
+type pinnedLoadedMsg struct {
+	msg *store.FeedMessage
+	err error
+}
+
+func (m Model) cmdLoadPinned() tea.Cmd {
+	if m.curRoom == nil {
+		return nil
+	}
+	roomID := m.curRoom.ID
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		msg, err := m.st.GetPinnedMessage(ctx, roomID)
+		return pinnedLoadedMsg{msg: msg, err: err}
+	}
+}
+
+type mentionsLoadedMsg struct {
+	items []store.FeedMessage
+	err   error
+}
+
+func (m Model) cmdLoadMentions() tea.Cmd {
+	if m.user == nil {
+		return nil
+	}
+	userID := m.user.ID
+	username := m.user.Username
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		items, err := m.st.ListMentions(ctx, userID, username, 50)
+		return mentionsLoadedMsg{items: items, err: err}
+	}
+}
+
+type openMentionMsg struct {
+	rootID      string
+	roomID      string
+	communityID string
+	err         error
+}
+
+func (m Model) cmdOpenSelectedMention() tea.Cmd {
+	if m.mentionsSel < 0 || m.mentionsSel >= len(m.mentions) {
+		return nil
+	}
+	match := m.mentions[m.mentionsSel]
+	messageID := match.ID
+	roomID := match.RoomID
+	communityID := match.CommunityID
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		rootID, err := m.st.ResolveThreadRootID(ctx, messageID)
+		if err != nil {
+			return openMentionMsg{err: err}
+		}
+		if rootID == "" {
+			return openMentionMsg{err: store.ErrNotFound}
+		}
+		return openMentionMsg{rootID: rootID, roomID: roomID, communityID: communityID}
+	}
+}
+
+type pinnedSetMsg struct {
+	err error
+}
+
+func (m Model) cmdPin(roomID, messageID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		err := m.st.PinMessage(ctx, roomID, messageID)
+		return pinnedSetMsg{err: err}
+	}
+}
+
+func (m Model) cmdUnpin(roomID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		err := m.st.UnpinRoom(ctx, roomID)
+		return pinnedSetMsg{err: err}
+	}
+}
+
+type deleteRoomResolvedMsg struct {
+	room *store.Room
+	err  error
+}
+
+func (m Model) cmdResolveRoomForDelete(communityID, name string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		r, err := m.st.GetRoomByName(ctx, communityID, name)
+		return deleteRoomResolvedMsg{room: r, err: err}
+	}
+}
+
+type roomDeletedMsg struct {
+	roomID      string
+	communityID string
+	err         error
+}
+
+func (m Model) cmdDeleteRoom(roomID string) tea.Cmd {
+	communityID := ""
+	if m.curCommunity != nil {
+		communityID = m.curCommunity.ID
+	}
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		err := m.st.DeleteRoom(ctx, roomID)
+		return roomDeletedMsg{roomID: roomID, communityID: communityID, err: err}
+	}
+}
+
+type communityDeletedMsg struct {
+	communityID string
+	err         error
+}
+
+func (m Model) cmdDeleteCommunity(communityID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		err := m.st.DeleteCommunity(ctx, communityID)
+		return communityDeletedMsg{communityID: communityID, err: err}
 	}
 }
 

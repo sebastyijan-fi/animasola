@@ -365,6 +365,177 @@ func TestGetUserProfile_ComputesStatsAndTopPosts(t *testing.T) {
 	}
 }
 
+func TestPinUnpinAndGetPinnedMessage(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "pins.db")
+
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	if err := st.Migrate(filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	u1, err := st.CreateUser(ctx, "seba", "fp1", "ssh-ed25519 AAAA...")
+	if err != nil {
+		t.Fatalf("CreateUser u1: %v", err)
+	}
+	c, r, err := st.CreateCommunity(ctx, u1.ID, "rust", "All things Rust")
+	if err != nil {
+		t.Fatalf("CreateCommunity: %v", err)
+	}
+	_ = c
+
+	msg, err := st.CreateMessage(ctx, r.ID, u1.ID, "hello", nil)
+	if err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+	if err := st.PinMessage(ctx, r.ID, msg.ID); err != nil {
+		t.Fatalf("PinMessage: %v", err)
+	}
+	pinned, err := st.GetPinnedMessage(ctx, r.ID)
+	if err != nil {
+		t.Fatalf("GetPinnedMessage: %v", err)
+	}
+	if pinned == nil || pinned.ID != msg.ID {
+		t.Fatalf("expected pinned message %q, got %#v", msg.ID, pinned)
+	}
+
+	if err := st.UnpinRoom(ctx, r.ID); err != nil {
+		t.Fatalf("UnpinRoom: %v", err)
+	}
+	pinned2, err := st.GetPinnedMessage(ctx, r.ID)
+	if err != nil {
+		t.Fatalf("GetPinnedMessage #2: %v", err)
+	}
+	if pinned2 != nil {
+		t.Fatalf("expected nil pinned after unpin, got %#v", pinned2)
+	}
+}
+
+func TestDeleteRoomAndCommunityCascade(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "del.db")
+
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	if err := st.Migrate(filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	u1, err := st.CreateUser(ctx, "seba", "fp1", "ssh-ed25519 AAAA...")
+	if err != nil {
+		t.Fatalf("CreateUser u1: %v", err)
+	}
+	u2, err := st.CreateUser(ctx, "kai", "fp2", "ssh-ed25519 AAAA...")
+	if err != nil {
+		t.Fatalf("CreateUser u2: %v", err)
+	}
+	c, r, err := st.CreateCommunity(ctx, u1.ID, "rust", "All things Rust")
+	if err != nil {
+		t.Fatalf("CreateCommunity: %v", err)
+	}
+	if err := st.JoinCommunity(ctx, u2.ID, c.ID); err != nil {
+		t.Fatalf("JoinCommunity: %v", err)
+	}
+	msg, err := st.CreateMessage(ctx, r.ID, u2.ID, "hi", nil)
+	if err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+
+	// Delete room should cascade message.
+	if err := st.DeleteRoom(ctx, r.ID); err != nil {
+		t.Fatalf("DeleteRoom: %v", err)
+	}
+	got, err := st.GetMessageByID(ctx, msg.ID)
+	if err != nil {
+		t.Fatalf("GetMessageByID: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("expected message deleted by cascade")
+	}
+
+	// Delete community should remove community row.
+	if err := st.DeleteCommunity(ctx, c.ID); err != nil {
+		t.Fatalf("DeleteCommunity: %v", err)
+	}
+	c2, err := st.GetCommunityByID(ctx, c.ID)
+	if err != nil {
+		t.Fatalf("GetCommunityByID: %v", err)
+	}
+	if c2 != nil {
+		t.Fatalf("expected community deleted")
+	}
+}
+
+func TestListMentions_ScopedToMembership(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "mentions.db")
+
+	st, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	if err := st.Migrate(filepath.Join("..", "..", "migrations")); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	u1, err := st.CreateUser(ctx, "seba", "fp1", "ssh-ed25519 AAAA...")
+	if err != nil {
+		t.Fatalf("CreateUser u1: %v", err)
+	}
+	u2, err := st.CreateUser(ctx, "kai", "fp2", "ssh-ed25519 AAAA...")
+	if err != nil {
+		t.Fatalf("CreateUser u2: %v", err)
+	}
+	c1, r1, err := st.CreateCommunity(ctx, u1.ID, "rust", "All things Rust")
+	if err != nil {
+		t.Fatalf("CreateCommunity c1: %v", err)
+	}
+	_, r2, err := st.CreateCommunity(ctx, u1.ID, "linux", "Penguins")
+	if err != nil {
+		t.Fatalf("CreateCommunity c2: %v", err)
+	}
+	if err := st.JoinCommunity(ctx, u2.ID, c1.ID); err != nil {
+		t.Fatalf("JoinCommunity: %v", err)
+	}
+
+	_, err = st.CreateMessage(ctx, r1.ID, u1.ID, "hi @kai", nil)
+	if err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+	_, err = st.CreateMessage(ctx, r2.ID, u1.ID, "hi @kai from linux", nil)
+	if err != nil {
+		t.Fatalf("CreateMessage2: %v", err)
+	}
+
+	ms, err := st.ListMentions(ctx, u2.ID, "kai", 50)
+	if err != nil {
+		t.Fatalf("ListMentions: %v", err)
+	}
+	if len(ms) != 1 {
+		t.Fatalf("expected 1 mention scoped to rust membership, got %d", len(ms))
+	}
+	if ms[0].CommunityName != "rust" {
+		t.Fatalf("expected rust mention, got %#v", ms[0])
+	}
+}
+
 func TestCreateCommunity_CreatesGeneralRoom(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "comm.db")

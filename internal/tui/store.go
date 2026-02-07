@@ -28,7 +28,14 @@ type Store interface {
 	ListRoomsByCommunity(ctx context.Context, communityID string) ([]store.Room, error)
 	CountRoomsByCommunity(ctx context.Context, communityID string) (int, error)
 	ListCommunityMembers(ctx context.Context, communityID string, limit int) ([]string, error)
+	GetRoomByName(ctx context.Context, communityID, name string) (*store.Room, error)
 	GetRoomByID(ctx context.Context, id string) (*store.Room, error)
+	PinMessage(ctx context.Context, roomID, messageID string) error
+	UnpinRoom(ctx context.Context, roomID string) error
+	GetPinnedMessage(ctx context.Context, roomID string) (*store.FeedMessage, error)
+	DeleteRoom(ctx context.Context, roomID string) error
+	DeleteCommunity(ctx context.Context, communityID string) error
+	ListMentions(ctx context.Context, userID, username string, limit int) ([]store.FeedMessage, error)
 	UpsertReadPosition(ctx context.Context, userID, roomID, lastReadMessageID string) error
 	UnreadCountsByCommunity(ctx context.Context, userID string) ([]store.CommunityUnread, error)
 	ListRoomTopLevelNew(ctx context.Context, roomID string, limit int, beforeID *string) ([]store.FeedMessage, error)

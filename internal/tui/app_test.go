@@ -27,6 +27,12 @@ type fakeStore struct {
 	profiles map[string]*store.UserProfile
 
 	members map[string][]string
+
+	roomsByName  map[string]map[string]store.Room
+	pinnedByRoom map[string]*store.FeedMessage
+	mentions     []store.FeedMessage
+
+	byMessageID map[string]store.FeedMessage
 }
 
 func (f *fakeStore) CreateCommunity(ctx context.Context, createdByUserID, name, description string) (*store.Community, *store.Room, error) {
@@ -127,6 +133,18 @@ func (f *fakeStore) ListCommunityMembers(ctx context.Context, communityID string
 	}
 	return append([]string(nil), m...), nil
 }
+func (f *fakeStore) GetRoomByName(ctx context.Context, communityID, name string) (*store.Room, error) {
+	if f.roomsByName == nil {
+		return nil, nil
+	}
+	if m, ok := f.roomsByName[communityID]; ok {
+		if r, ok := m[name]; ok {
+			rr := r
+			return &rr, nil
+		}
+	}
+	return nil, nil
+}
 func (f *fakeStore) GetRoomByID(ctx context.Context, id string) (*store.Room, error) {
 	if f.roomsByID != nil {
 		if r, ok := f.roomsByID[id]; ok {
@@ -135,6 +153,59 @@ func (f *fakeStore) GetRoomByID(ctx context.Context, id string) (*store.Room, er
 		}
 	}
 	return nil, nil
+}
+func (f *fakeStore) PinMessage(ctx context.Context, roomID, messageID string) error {
+	if f.pinnedByRoom == nil {
+		f.pinnedByRoom = make(map[string]*store.FeedMessage)
+	}
+	if f.byMessageID != nil {
+		if msg, ok := f.byMessageID[messageID]; ok {
+			m := msg
+			f.pinnedByRoom[roomID] = &m
+		}
+	}
+	return nil
+}
+func (f *fakeStore) UnpinRoom(ctx context.Context, roomID string) error {
+	if f.pinnedByRoom != nil {
+		f.pinnedByRoom[roomID] = nil
+	}
+	return nil
+}
+func (f *fakeStore) GetPinnedMessage(ctx context.Context, roomID string) (*store.FeedMessage, error) {
+	if f.pinnedByRoom == nil {
+		return nil, nil
+	}
+	return f.pinnedByRoom[roomID], nil
+}
+func (f *fakeStore) DeleteRoom(ctx context.Context, roomID string) error {
+	for cid, rs := range f.rooms {
+		out := rs[:0]
+		for _, r := range rs {
+			if r.ID != roomID {
+				out = append(out, r)
+			}
+		}
+		f.rooms[cid] = out
+	}
+	return nil
+}
+func (f *fakeStore) DeleteCommunity(ctx context.Context, communityID string) error {
+	out := f.joined[:0]
+	for _, c := range f.joined {
+		if c.ID != communityID {
+			out = append(out, c)
+		}
+	}
+	f.joined = out
+	delete(f.rooms, communityID)
+	return nil
+}
+func (f *fakeStore) ListMentions(ctx context.Context, userID, username string, limit int) ([]store.FeedMessage, error) {
+	if len(f.mentions) > limit {
+		return f.mentions[:limit], nil
+	}
+	return f.mentions, nil
 }
 func (f *fakeStore) UpsertReadPosition(ctx context.Context, userID, roomID, lastReadMessageID string) error {
 	return nil
@@ -314,7 +385,17 @@ func applyCmd(t *testing.T, model tea.Model, cmd tea.Cmd) tea.Model {
 	if cmd == nil {
 		return model
 	}
-	msg := cmd()
+	// Some Bubble Tea commands (cursor blink, ticks) block by design.
+	// In the real runtime they run asynchronously; in tests we skip anything
+	// that doesn't produce a message quickly.
+	ch := make(chan tea.Msg, 1)
+	go func() { ch <- cmd() }()
+	var msg tea.Msg
+	select {
+	case msg = <-ch:
+	case <-time.After(200 * time.Millisecond):
+		return model
+	}
 	switch msg := msg.(type) {
 	case tea.BatchMsg:
 		// In Bubble Tea, BatchMsg contains a list of Cmds to be executed.
@@ -702,6 +783,205 @@ func TestMembersCommandLoadsMembersViewAndEnterOpensProfile(t *testing.T) {
 	}
 	if m.profile == nil || m.profile.Username != "kai" {
 		t.Fatalf("expected kai profile")
+	}
+}
+
+func TestPinAndUnpinCommandsUpdatePinnedMessage(t *testing.T) {
+	fs := &fakeStore{
+		byMessageID: map[string]store.FeedMessage{
+			"m1": {Message: store.Message{ID: "m1", RoomID: "r1"}, AuthorUsername: "a"},
+		},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	m.v = viewRoom
+	m.curCommunity = &store.Community{ID: "c1", Name: "rust"}
+	m.curRoom = &store.Room{ID: "r1", Name: "general", CommunityID: "c1"}
+	m.feed = []store.FeedMessage{{Message: store.Message{ID: "m1", RoomID: "r1"}, AuthorUsername: "a"}}
+	m.feedSel = 0
+	m.focus = focusMain
+	m.mainFocus = mainInput
+	m.input.Focus()
+
+	m.input.SetValue("/pin")
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected cmd")
+	}
+	model := applyCmd(t, m, cmd)
+	m = model.(Model)
+	if m.pinned == nil || m.pinned.ID != "m1" {
+		t.Fatalf("expected pinned m1, got %#v", m.pinned)
+	}
+
+	m.mainFocus = mainInput
+	m.input.Focus()
+	m.input.SetValue("/unpin")
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected cmd")
+	}
+	model = applyCmd(t, m, cmd)
+	m = model.(Model)
+	if m.pinned != nil {
+		t.Fatalf("expected pinned cleared, got %#v", m.pinned)
+	}
+}
+
+func TestMentionsCommandLoadsAndEnterOpensThread(t *testing.T) {
+	fs := &fakeStore{
+		joined: []store.Community{{ID: "c1", Name: "rust"}},
+		mentions: []store.FeedMessage{
+			{Message: store.Message{ID: "m1", RoomID: "r1"}, CommunityID: "c1", CommunityName: "rust", RoomName: "general", AuthorUsername: "kai"},
+		},
+		thread: map[string][]store.FeedMessage{
+			"m1": {{Message: store.Message{ID: "m1", RoomID: "r1"}, AuthorUsername: "kai"}},
+		},
+		roomsByID: map[string]store.Room{
+			"r1": {ID: "r1", Name: "general", CommunityID: "c1"},
+		},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = model.(Model)
+	model = applyCmd(t, m, m.cmdLoadJoined())
+	m = model.(Model)
+
+	m.focus = focusMain
+	m.mainFocus = mainInput
+	m.input.Focus()
+	m.input.SetValue("/mentions")
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected cmd")
+	}
+	model = applyCmd(t, m, cmd)
+	m = model.(Model)
+	if m.v != viewMentions {
+		t.Fatalf("expected viewMentions")
+	}
+	if len(m.mentions) != 1 {
+		t.Fatalf("expected 1 mention")
+	}
+
+	m.mainFocus = mainNav
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected open cmd")
+	}
+	model = applyCmd(t, m, cmd)
+	m = model.(Model)
+	if m.v != viewThread {
+		t.Fatalf("expected viewThread")
+	}
+	if m.threadRootID != "m1" {
+		t.Fatalf("expected threadRootID m1, got %q", m.threadRootID)
+	}
+}
+
+func TestDeleteRoomCommandPromptsAndDeletesOnYes(t *testing.T) {
+	fs := &fakeStore{
+		roomsByName: map[string]map[string]store.Room{
+			"c1": {"general": {ID: "r1", Name: "general", CommunityID: "c1"}},
+		},
+		rooms: map[string][]store.Room{
+			"c1": {{ID: "r1", Name: "general", CommunityID: "c1"}},
+		},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	m.curCommunity = &store.Community{ID: "c1", Name: "rust"}
+	m.curRoom = &store.Room{ID: "r1", Name: "general", CommunityID: "c1"}
+	m.v = viewRoom
+	m.focus = focusMain
+	m.mainFocus = mainInput
+	m.input.Focus()
+	m.input.SetValue("/delete-room general")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected resolve cmd")
+	}
+	model := applyCmd(t, m, cmd)
+	m = model.(Model)
+	if !m.deleteRoomConfirm {
+		t.Fatalf("expected deleteRoomConfirm")
+	}
+
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected delete cmd")
+	}
+	// Avoid applyCmd timeouts by stepping one message at a time.
+	msg := cmd()
+	if _, ok := msg.(roomDeletedMsg); !ok {
+		t.Fatalf("expected roomDeletedMsg, got %T", msg)
+	}
+	updated, next := m.Update(msg)
+	m = updated.(Model)
+	if next != nil {
+		model = applyCmd(t, m, next)
+		m = model.(Model)
+	}
+	if m.v != viewCommunity {
+		cur := "<nil>"
+		if m.curRoom != nil {
+			cur = m.curRoom.ID
+		}
+		t.Fatalf("expected viewCommunity after deleting current room; v=%v curRoom=%s", m.v, cur)
+	}
+	if len(fs.rooms["c1"]) != 0 {
+		t.Fatalf("expected room removed from store")
+	}
+}
+
+func TestDeleteCommunityCommandDoubleConfirm(t *testing.T) {
+	fs := &fakeStore{
+		joined: []store.Community{{ID: "c1", Name: "rust"}},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = model.(Model)
+	model = applyCmd(t, m, m.cmdLoadJoined())
+	m = model.(Model)
+
+	m.curCommunity = &store.Community{ID: "c1", Name: "rust"}
+	m.v = viewCommunity
+	m.focus = focusMain
+	m.mainFocus = mainInput
+	m.input.Focus()
+	m.input.SetValue("/delete-community")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("expected no cmd on prompt")
+	}
+	if !m.deleteCommunityConfirm {
+		t.Fatalf("expected deleteCommunityConfirm")
+	}
+
+	m.input.SetValue("rust")
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected delete cmd")
+	}
+	model = applyCmd(t, m, cmd)
+	m = model.(Model)
+	if m.v != viewHome {
+		t.Fatalf("expected viewHome")
+	}
+	if len(fs.joined) != 0 {
+		t.Fatalf("expected community removed from store")
 	}
 }
 

@@ -96,8 +96,36 @@ func (s *storeWithEvents) ListCommunityMembers(ctx context.Context, communityID 
 	return s.st.ListCommunityMembers(ctx, communityID, limit)
 }
 
+func (s *storeWithEvents) GetRoomByName(ctx context.Context, communityID, name string) (*store.Room, error) {
+	return s.st.GetRoomByName(ctx, communityID, name)
+}
+
 func (s *storeWithEvents) GetRoomByID(ctx context.Context, id string) (*store.Room, error) {
 	return s.st.GetRoomByID(ctx, id)
+}
+
+func (s *storeWithEvents) PinMessage(ctx context.Context, roomID, messageID string) error {
+	return s.st.PinMessage(ctx, roomID, messageID)
+}
+
+func (s *storeWithEvents) UnpinRoom(ctx context.Context, roomID string) error {
+	return s.st.UnpinRoom(ctx, roomID)
+}
+
+func (s *storeWithEvents) GetPinnedMessage(ctx context.Context, roomID string) (*store.FeedMessage, error) {
+	return s.st.GetPinnedMessage(ctx, roomID)
+}
+
+func (s *storeWithEvents) DeleteRoom(ctx context.Context, roomID string) error {
+	return s.st.DeleteRoom(ctx, roomID)
+}
+
+func (s *storeWithEvents) DeleteCommunity(ctx context.Context, communityID string) error {
+	return s.st.DeleteCommunity(ctx, communityID)
+}
+
+func (s *storeWithEvents) ListMentions(ctx context.Context, userID, username string, limit int) ([]store.FeedMessage, error) {
+	return s.st.ListMentions(ctx, userID, username, limit)
 }
 
 func (s *storeWithEvents) UpsertReadPosition(ctx context.Context, userID, roomID, lastReadMessageID string) error {
