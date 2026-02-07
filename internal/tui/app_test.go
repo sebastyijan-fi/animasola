@@ -361,3 +361,31 @@ func TestHomeFeedPaginationLoadsMoreAtBottom(t *testing.T) {
 		t.Fatalf("expected last item m1, got %q", m.homeItems[2].ID)
 	}
 }
+
+func TestCtrlRRefreshesRoomFeed(t *testing.T) {
+	fs := &fakeStore{
+		feed: map[string][]store.FeedMessage{
+			"r1": {
+				{Message: store.Message{ID: "m1"}, AuthorUsername: "a"},
+			},
+		},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	m.v = viewRoom
+	m.curRoom = &store.Room{ID: "r1", Name: "general"}
+	m.feedSort = store.SortNew
+	m.focus = focusMain
+	m.mainFocus = mainNav
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatalf("expected refresh cmd")
+	}
+	model := applyCmd(t, m, cmd)
+	m = model.(Model)
+	if len(m.feed) != 1 || m.feed[0].ID != "m1" {
+		t.Fatalf("expected feed reloaded, got %#v", m.feed)
+	}
+}

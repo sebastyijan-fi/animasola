@@ -485,6 +485,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cancel()
 			}
 			return m, tea.Quit
+		case "ctrl+r":
+			switch m.v {
+			case viewHome:
+				m.homeLoading = true
+				return m, m.cmdLoadHomeReset()
+			case viewRoom:
+				m.feedLoading = true
+				return m, m.cmdLoadFeedReset()
+			case viewThread:
+				if m.threadRootID != "" {
+					return m, m.cmdLoadThread(m.threadRootID)
+				}
+				return m, nil
+			default:
+				return m, nil
+			}
 		// Global shortcuts that should work even while typing.
 		// We use Alt-modified keys to avoid conflicting with normal text entry.
 		case "alt+q":
