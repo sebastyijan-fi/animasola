@@ -1,0 +1,23 @@
+# Server
+host: 0.0.0.0
+port: 23234
+
+# Registration endpoint.
+# Note: SSH does not provide the server with the hostname the client used.
+# In dev we run a separate listener on `register_port`.
+register_port: 23235
+
+domain: animasola.org
+register_domain: register.animasola.org
+
+# Database
+database_path: ./data/animasola.db
+
+# SSH
+host_key_path: ./data/host_key
+
+# Limits (v1 defaults)
+max_message_length: 5000
+max_communities_per_user: 5
+max_rooms_per_community: 20
+messages_per_page: 30
