@@ -520,3 +520,77 @@ func TestSearchShowsTruncationHintWhenMoreThan50Results(t *testing.T) {
 		t.Fatalf("expected truncation hint in view")
 	}
 }
+
+func TestMouseClickSidebarOpensCommunityDefaultRoom(t *testing.T) {
+	fs := &fakeStore{
+		joined: []store.Community{{ID: "c1", Name: "rust"}},
+		rooms: map[string][]store.Room{
+			"c1": {{ID: "r1", Name: "general", CommunityID: "c1"}},
+		},
+		feed: map[string][]store.FeedMessage{
+			"r1": {{Message: store.Message{ID: "m1", RoomID: "r1"}, AuthorUsername: "a"}},
+		},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	// Make sidebar visible.
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = model.(Model)
+	// Load joined list into the model.
+	model = applyCmd(t, m, m.cmdLoadJoined())
+	m = model.(Model)
+	// Ensure nav focus so clicks operate on lists.
+	m.focus = focusMain
+	m.mainFocus = mainNav
+
+	model, cmd := m.Update(tea.MouseMsg{X: 0, Y: 2, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	if cmd == nil {
+		t.Fatalf("expected open community cmd")
+	}
+	model = applyCmd(t, model, cmd)
+	m = model.(Model)
+	if m.v != viewRoom || m.curRoom == nil || m.curRoom.ID != "r1" {
+		t.Fatalf("expected to be in room r1, got view=%v room=%#v", m.v, m.curRoom)
+	}
+}
+
+func TestMouseClickRoomMessageOpensThread(t *testing.T) {
+	fs := &fakeStore{
+		feed: map[string][]store.FeedMessage{
+			"r1": {
+				{Message: store.Message{ID: "m1", RoomID: "r1"}, AuthorUsername: "a"},
+			},
+		},
+		thread: map[string][]store.FeedMessage{
+			"m1": {{Message: store.Message{ID: "m1", RoomID: "r1"}, AuthorUsername: "a"}},
+		},
+	}
+	u := &store.User{ID: "u1", Username: "seba"}
+	m := NewApp("animasola", fs, nil, u)
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = model.(Model)
+	m.v = viewRoom
+	m.curRoom = &store.Room{ID: "r1", Name: "general"}
+	m.feedSort = store.SortNew
+	m.focus = focusMain
+	m.mainFocus = mainNav
+
+	// Load feed.
+	m.feedLoading = true
+	model = applyCmd(t, m, m.cmdLoadFeedReset())
+	m = model.(Model)
+
+	// Click on the first item's meta line (main content starts at y=2; room view adds 2 lines before items).
+	// Sidebar is visible, so main starts after 21 columns.
+	clickY := 2 + 2 + 0
+	clickX := 21 + 5
+	model, cmd := m.Update(tea.MouseMsg{X: clickX, Y: clickY, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft})
+	if cmd == nil {
+		t.Fatalf("expected open thread cmd")
+	}
+	model = applyCmd(t, model, cmd)
+	m = model.(Model)
+	if m.v != viewThread {
+		t.Fatalf("expected thread view, got %v", m.v)
+	}
+}

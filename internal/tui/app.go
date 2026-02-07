@@ -255,6 +255,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg { return feedSpinTickMsg{} })
 	}
 
+	if mm, ok := msg.(tea.MouseMsg); ok {
+		return m.handleMouse(mm)
+	}
+
 	// async results
 	switch msg := msg.(type) {
 	case searchDebounceMsg:
@@ -1450,6 +1454,366 @@ func (m *Model) openSearch(initialQuery string) {
 	m.input.Blur()
 }
 
+func (m Model) mainX0() int {
+	if m.sidebarVisible() {
+		return components.SidebarWidth + 1 // plus separator
+	}
+	return 1 // padding when sidebar hidden
+}
+
+func (m Model) contentStartY() int {
+	// header() ends with "\n\n": 2 lines (header + blank)
+	y := 2
+	if m.errMsg != "" && time.Now().Before(m.errUntil) {
+		// err line + blank line
+		y += 2
+	}
+	return y
+}
+
+func (m *Model) focusInput() {
+	m.focus = focusMain
+	m.mainFocus = mainInput
+	m.input.Focus()
+	m.searchOpen = false
+	m.searchInput.Blur()
+}
+
+func (m Model) handleMouse(mm tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// Only respond to clicks/wheel.
+	if mm.Action != tea.MouseActionPress && !tea.MouseEvent(mm).IsWheel() {
+		return m, nil
+	}
+
+	// Click on the input area should focus input.
+	if mm.Button == tea.MouseButtonLeft && mm.Action == tea.MouseActionPress {
+		// Bottom area: separator + optional "replying to" context + input
+		if mm.Y >= m.height-2 {
+			(&m).focusInput()
+			return m, nil
+		}
+	}
+
+	// Sidebar interactions.
+	if m.sidebarVisible() && mm.X < components.SidebarWidth {
+		switch mm.Button {
+		case tea.MouseButtonWheelUp:
+			if m.focus == focusSidebar {
+				m.sidebar.Selected = max(0, m.sidebar.Selected-3)
+				m.joinedSel = m.sidebar.Selected
+			}
+			return m, nil
+		case tea.MouseButtonWheelDown:
+			if m.focus == focusSidebar {
+				m.sidebar.Selected = min(len(m.joined)-1, m.sidebar.Selected+3)
+				m.joinedSel = m.sidebar.Selected
+			}
+			return m, nil
+		case tea.MouseButtonLeft:
+			// Items start at y=2 (header + blank).
+			i := mm.Y - 2
+			if i < 0 || i >= len(m.joined) {
+				return m, nil
+			}
+			m.focus = focusSidebar
+			m.mainFocus = mainNav
+			m.input.Blur()
+			m.sidebar.Selected = i
+			m.joinedSel = i
+			c := m.joined[i]
+			return m, m.cmdOpenCommunityDefault(c.ID)
+		default:
+			return m, nil
+		}
+	}
+
+	// Main area interactions.
+	x0 := m.mainX0()
+	if mm.X < x0 {
+		return m, nil
+	}
+	y0 := m.contentStartY()
+	mainY := mm.Y - y0
+	if mainY < 0 {
+		return m, nil
+	}
+
+	if m.searchOpen {
+		return m.handleMouseSearch(mainY, mm)
+	}
+
+	// Wheel scroll in main areas adjusts selection like keyboard nav.
+	if tea.MouseEvent(mm).IsWheel() {
+		return m.handleMouseWheelMain(mm)
+	}
+
+	if mm.Button != tea.MouseButtonLeft || mm.Action != tea.MouseActionPress {
+		return m, nil
+	}
+
+	// Click-to-select / click-to-open.
+	switch m.v {
+	case viewHome:
+		return m.handleMouseHomeClick(mainY, mm.X-x0)
+	case viewRoom:
+		return m.handleMouseRoomClick(mainY, mm.X-x0)
+	case viewThread:
+		return m.handleMouseThreadClick(mainY, mm.X-x0)
+	case viewCommunities:
+		return m.handleMouseSimpleListClick(mainY, len(m.joined), func(i int) (tea.Model, tea.Cmd) {
+			m.joinedSel = i
+			if len(m.joined) == 0 {
+				return m, nil
+			}
+			c := m.joined[i]
+			m.curCommunity = &c
+			m.v = viewCommunity
+			m.push(nav{v: viewCommunities, communitySel: i})
+			return m, m.cmdLoadRooms(c.ID)
+		})
+	case viewExplore:
+		return m.handleMouseSimpleListClick(mainY, len(m.expl), func(i int) (tea.Model, tea.Cmd) {
+			m.explSel = i
+			if len(m.expl) == 0 {
+				return m, nil
+			}
+			c := m.expl[i]
+			return m, m.cmdJoinCommunity(c.ID)
+		})
+	case viewCommunity:
+		return m.handleMouseSimpleListClick(mainY, len(m.rooms), func(i int) (tea.Model, tea.Cmd) {
+			m.roomSel = i
+			if len(m.rooms) == 0 {
+				return m, nil
+			}
+			r := m.rooms[i]
+			m.curRoom = &r
+			m.v = viewRoom
+			m.feedSort = store.SortHot
+			m.feedTopRange = store.TopWeek
+			m.feedNewCur = nil
+			m.feedTopCur = nil
+			m.feedHotCur = nil
+			m.feedHasMore = false
+			m.feedLoading = true
+			m.feedSpinIdx = 0
+			m.feedPending = 0
+			m.push(nav{v: viewCommunity, communityID: m.curCommunity.ID, roomSel: i})
+			return m, m.cmdLoadFeedReset()
+		})
+	default:
+		return m, nil
+	}
+}
+
+func (m Model) handleMouseWheelMain(mm tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.focus != focusMain || m.mainFocus != mainNav {
+		return m, nil
+	}
+	delta := 3
+	if mm.Button == tea.MouseButtonWheelUp {
+		delta = -3
+	}
+	switch m.v {
+	case viewHome:
+		m.homeSel = clampIndex(m.homeSel+delta, len(m.homeItems))
+		if m.homeSel >= len(m.homeItems)-1 && m.homeHasMore && !m.homeLoading {
+			m.homeLoading = true
+			return m, m.cmdLoadHomeMore()
+		}
+		return m, nil
+	case viewRoom:
+		m.feedSel = clampIndex(m.feedSel+delta, len(m.feed))
+		if m.feedSel >= len(m.feed)-1 && m.feedHasMore && !m.feedLoading {
+			m.feedLoading = true
+			return m, m.cmdLoadFeedMore()
+		}
+		return m, nil
+	case viewThread:
+		m.threadSel = clampIndex(m.threadSel+delta, len(m.threadItems))
+		return m, nil
+	case viewCommunities:
+		m.joinedSel = clampIndex(m.joinedSel+delta, len(m.joined))
+		return m, nil
+	case viewExplore:
+		m.explSel = clampIndex(m.explSel+delta, len(m.expl))
+		return m, nil
+	case viewCommunity:
+		m.roomSel = clampIndex(m.roomSel+delta, len(m.rooms))
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
+func (m Model) handleMouseSearch(mainY int, mm tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// Search view:
+	// 0: "Search: <input>"
+	// 1: blank
+	if tea.MouseEvent(mm).IsWheel() {
+		delta := 3
+		if mm.Button == tea.MouseButtonWheelUp {
+			delta = -3
+		}
+		m.searchSel = clampIndex(m.searchSel+delta, len(m.searchResults))
+		return m, nil
+	}
+	if mm.Button != tea.MouseButtonLeft {
+		return m, nil
+	}
+	if mainY == 0 {
+		m.focus = focusMain
+		m.mainFocus = mainSearch
+		m.searchInput.Focus()
+		m.input.Blur()
+		return m, nil
+	}
+	// Results start at y=2, but also have optional blocks for err/loading/empty states.
+	y := mainY - 2
+	if y < 0 {
+		return m, nil
+	}
+	// Each result is 3+ lines: meta line, content (wrapped), votes line, blank line.
+	// For hit-testing we approximate by selecting the closest item based on cumulative height.
+	mw := m.mainWidth()
+	w := max(20, mw-6)
+	curY := 0
+	for i, it := range m.searchResults {
+		content := it.HighlightedContent
+		if content == "" {
+			content = it.Content
+		}
+		lines := 1 + lineCount(wrap(renderHighlightMarkers(content), w)) + 1 + 1
+		if y >= curY && y < curY+lines {
+			m.searchSel = i
+			m.mainFocus = mainSearch
+			m.searchInput.Focus()
+			m.input.Blur()
+			// Click opens the thread.
+			return m, m.cmdOpenSelectedSearchResult()
+		}
+		curY += lines
+	}
+	return m, nil
+}
+
+func (m Model) handleMouseHomeClick(mainY int, relX int) (tea.Model, tea.Cmd) {
+	// Home view layout:
+	// 0: "Home · ..."
+	// 1: blank
+	// then items
+	y := mainY - 2
+	if y < 0 {
+		return m, nil
+	}
+	mw := m.mainWidth()
+	w := max(20, mw-6)
+	curY := 0
+	for i, it := range m.homeItems {
+		content := it.Content
+		lines := 1 + lineCount(wrap(content, w)) + 1 + 1
+		if y >= curY && y < curY+lines {
+			// Click on the selector column selects only; elsewhere opens.
+			m.homeSel = i
+			m.focus = focusMain
+			m.mainFocus = mainNav
+			m.input.Blur()
+			if relX <= 2 {
+				return m, nil
+			}
+			id := it.ID
+			roomID := it.RoomID
+			communityID := it.CommunityID
+			m.v = viewThread
+			m.push(nav{v: viewHome, homeSel: i})
+			return m, tea.Batch(m.cmdLoadRoomContext(communityID, roomID), m.cmdLoadThread(id))
+		}
+		curY += lines
+	}
+	return m, nil
+}
+
+func (m Model) handleMouseRoomClick(mainY int, relX int) (tea.Model, tea.Cmd) {
+	// Room view layout:
+	// 0: "Room · ..."
+	// 1: blank
+	// then items
+	y := mainY - 2
+	if y < 0 {
+		return m, nil
+	}
+	mw := m.mainWidth()
+	w := max(20, mw-6)
+	curY := 0
+	for i, it := range m.feed {
+		content := it.Content
+		lines := 1 + lineCount(wrap(content, w)) + 1
+		if y >= curY && y < curY+lines {
+			m.feedSel = i
+			m.focus = focusMain
+			m.mainFocus = mainNav
+			m.input.Blur()
+			if relX <= 2 {
+				return m, nil
+			}
+			root := it.ID
+			m.v = viewThread
+			m.push(nav{v: viewRoom, roomID: m.curRoom.ID, feedSel: i})
+			return m, m.cmdLoadThread(root)
+		}
+		curY += lines
+	}
+	return m, nil
+}
+
+func (m Model) handleMouseThreadClick(mainY int, relX int) (tea.Model, tea.Cmd) {
+	// Thread layout:
+	// 0: "← Back..."
+	// 1: blank
+	y := mainY - 2
+	if y < 0 {
+		return m, nil
+	}
+	mw := m.mainWidth()
+	curY := 0
+	for i, it := range m.threadItems {
+		content := it.msg.Content
+		if it.overflowCtx != "" {
+			content = "replying to " + it.overflowCtx + ": " + content
+		}
+		w := max(20, mw-6-len(it.treePrefix))
+		lines := 1 + lineCount(wrap(content, w)) + 1
+		if y >= curY && y < curY+lines {
+			m.threadSel = i
+			m.focus = focusMain
+			m.mainFocus = mainNav
+			m.input.Blur()
+			return m, nil
+		}
+		curY += lines
+	}
+	return m, nil
+}
+
+func (m Model) handleMouseSimpleListClick(mainY int, n int, onSelect func(i int) (tea.Model, tea.Cmd)) (tea.Model, tea.Cmd) {
+	// Simple list views render a title line, blank line, then one item per line.
+	i := mainY - 2
+	if i < 0 || i >= n {
+		return m, nil
+	}
+	m.focus = focusMain
+	m.mainFocus = mainNav
+	m.input.Blur()
+	return onSelect(i)
+}
+
+func lineCount(s string) int {
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
+}
+
 func (m *Model) pop() (tea.Model, tea.Cmd) {
 	if len(m.stack) == 0 {
 		return *m, nil
@@ -2242,6 +2606,13 @@ func relTime(t time.Time) string {
 
 func max(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b
