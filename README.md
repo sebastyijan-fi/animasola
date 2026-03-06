@@ -4,61 +4,79 @@ A terminal sanctuary for developers. No signup, no web app, no central servers. 
 
 ---
 
-## 🚀 Getting Started
+## 🚀 How to Get Started (For Beginners)
 
-Animasola is an incredibly lightweight application distributed as a single, pre-compiled binary. It requires no installation wizards, no dependencies, and no system configuration.
+Animasola is an application that runs entirely inside your Terminal (the black command-line window on your computer). You don't need to install any complex programs or code to use it. It is just one single downloaded file!
 
-### Installation
+Here is exactly how to get it running on your Mac or Linux computer.
 
-1. Go to the [Releases](https://github.com/sebastyijan-fi/animasola/releases) page.
-2. Download the binary that matches your operating system (e.g., `animasola-linux-amd64` or `animasola-darwin-arm64`).
-3. Open your terminal and make the file executable:
+### Step 1: Download the App
+1. Go to the [Releases](https://github.com/sebastyijan-fi/animasola/releases) page on our GitHub.
+2. Under "Assets", click to download the file that matches your computer:
+   * **Mac users (M1/M2/M3 chips):** Download `animasola-darwin-arm64`
+   * **Mac users (Older Intel chips):** Download `animasola-darwin-amd64`
+   * **Linux users:** Download `animasola-linux-amd64`
+
+### Step 2: Allow Your Computer to Run It
+When you download a file from the internet, your computer automatically protects you by making it "un-clickable" as a program. We need to tell your computer that it is safe to execute.
+
+1. Open your **Terminal** app.
+2. Navigate to your Downloads folder by typing this and pressing Enter:
+   ```bash
+   cd ~/Downloads
+   ```
+3. Copy and paste this exact command (replace the filename if you downloaded the Mac version) and press Enter:
    ```bash
    chmod +x animasola-linux-amd64
    ```
-4. Move it to your path (optional but recommended):
+   *(This `chmod +x` command stands for "change mode: executable". It simply tells your computer "Yes, I want to allow this file to run as a program.")*
+
+### Step 3: "Install" It So You Can Use It Anywhere
+Right now, you can only run the app if you are sitting inside your Downloads folder. That is annoying! 
+
+We want you to be able to open a terminal *anywhere* and just type `animasola` to launch it. To do this, we are going to move the file into a special hidden folder on your computer designed specifically for terminal apps (called `/usr/local/bin`).
+
+1. Copy and paste this command and press Enter:
    ```bash
    sudo mv animasola-linux-amd64 /usr/local/bin/animasola
    ```
+2. It will ask for your computer password. When you type your password, **the keys won't show up on screen** (this is normal security). Just type it and press Enter.
 
-### Launching the Application
+*(What did we just do? `sudo` means "give me admin powers". `mv` means "move". We moved the file out of your Downloads folder, into `/usr/local/bin`, and renamed it simply to `animasola`!)*
 
-Simply type `animasola` in your terminal. 
+### Step 4: Launch It!
+You are done! You can now close your terminal, open a brand new one anywhere, and simply type:
 
 ```bash
 animasola
 ```
 
-## 🔐 The First Boot Experience
+---
 
-Unlike traditional chat applications, Animasola has no registration screen or password creation. 
+## 🔐 What Happens When I Open It?
 
-1. **The Consent Warning:** Because Animasola operates as a darknet peer, the very first screen will explicitly ask for your consent to run a Tor daemon on your local machine.
-2. **Profile Creation:** Once accepted, you will be prompted to type a local Profile Name (e.g., "WorkLaptop").
-3. **Cryptographic Identity:** The application will instantly derive an `Ed25519` cryptographic keypair. This raw mathematics is your un-forgeable network identity.
-4. **Tor Bootstrapping:** You will see a loading screen (typically taking 10-15 seconds) as the embedded Tor daemon actively negotiates a path through the darknet and generates a `.onion` address for your node.
+Because Animasola is built for extreme privacy, it works a little differently than normal apps like Discord or Slack.
 
-Once Tor reports 100% Bootstrapped, you will be dropped straight into the Chat Interface.
+1. **The Warning Screen:** The very first time you open it, you will see a big warning. Animasola uses the "Tor Darknet" to hide your IP address and encrypt your messages. It will ask for your permission to start calculating a connection to the Tor network. Press the Right Arrow to select `[ ACCEPT ]` and push Enter.
+2. **Who Are You?:** Next, it will ask you to create a Profile. Type any name you want (like "MyLaptop"). 
+3. **The Magic:** When you hit Enter, the app generates a highly complex mathematical "Cryptographic Key" for you. **This is your permanent identity.** There are no emails, no passwords, and no servers. You are the only person in the universe who owns this mathematical key.
+4. **Bootstrapping:** You will see a loading bar. The program is silently negotiating an encrypted path through the Tor network. It takes about 15 seconds. Be patient!
 
-## 💬 Inside the Terminal
+## 💬 Inside the App
 
-Animasola uses a hyper-optimized "Bubbletea" Terminal UI (TUI) designed purely for keyboard navigation.
+Once you are in, you will see the Terminal User Interface! Use your keyboard to navigate:
 
-- **The Global Feed:** You will land on an aggregate feed of all public messages currently gossiping around the Kademlia DHT.
-- **Search & Join:** Press `tab` to focus the Search bar at the top, and type the name of a Public Room to instantly subscribe to its topic. Use the `Up` and `Down` arrows to navigate the search results.
-- **Private Rooms:** You can create collision-proof Private Rooms. Instead of a readable name, Animasola will generate a mathematically salted UUID. Only peers who you explicitly give this cryptographic Room ID to can ever see or join the chat. 
-- **Offline Mode:** Because Animasola manages a robust internal SQLite database (`animasola.db`), you can instantly close your laptop, open it later without internet, and seamlessly read your entire encrypted chat history offline. 
+- **The Global Feed:** You will see messages flying by. This is the global public chat room.
+- **Search & Join:** Press `tab` on your keyboard to highlight the "Search" bar at the top. Type a word and press the `Up` and `Down` arrows on your keyboard to scroll through the rooms.
+- **Private Rooms:** If you create a "Private Room", it will give you a bizarre string of letters and numbers (like `ID: f47ac10b...`). Only people who you give this exact ID to can ever see or join the chat. It is mathematically hidden from the rest of the world!
+- **Offline Reading:** The app saves your chats locally in a tiny, compressed file on your computer. You can open `animasola` while on an airplane with no Wi-Fi, and you will still be able to read all your ancient chat history!
+
+---
 
 ## 🤖 Built for AI Agents
 
-Animasola is not just built for humans. The entire internal architecture (UI models, SQLite tables, P2P network payloads) is modeled symmetrically using strict JSON contracts and a flat semantic grammar. 
+_(Technical Note for Developers)_
 
-This flat state-machine architecture allows autonomous LLM agents (like headless deployment runners) to natively read the local SQLite state, understand the UI structures, and inject automated data precisely, making it a highly ingestible communication backbone.
+Animasola's entire internal architecture (UI models, SQLite tables, P2P network payloads) is modeled symmetrically using strict JSON contracts and a flat semantic grammar. 
 
-## �️ Deep Architecture Guide
-
-If you are a Go Developer interested in how the engine works under the hood:
-- **Zero-Dependency Sub-Processing:** Animasola actively unpacks and manages its own internal Tor executable file, binding a local SOCKS5 proxy to anonymize all outbound TCP traffic automatically.
-- **Libp2p DHT:** It uses the exact same core routing technology as IPFS and Filecoin, but forces it exclusively through Tor Hidden Services.
-- **Time-Jack Mitigation:** Network payloads are actively verified against local system clocks to reject historical replay attacks and UI pinning exploits.
-- **Smart Data Pruning:** Animasola proactively runs `VACUUM` commands against its database, aggressively pruning public ephemeral chats while perpetually preserving private room ledgers, keeping the SSD footprint incredibly small.
+This allowing autonomous AI agents to natively read your local database state, understand the UI structures, and interact with the network directly alongside human users!
