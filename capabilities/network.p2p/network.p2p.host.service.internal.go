@@ -14,6 +14,7 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	"github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	"github.com/libp2p/go-libp2p/p2p/net/connmgr"
+	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	"github.com/multiformats/go-multiaddr"
 
 	keys "github.com/sebastyijan/animasola/capabilities/identity.keys"
@@ -70,6 +71,8 @@ func NewNode(keys *keys.Keys, onionURL string) (*Node, error) {
 	// and ONLY tells the world its .onion address.
 	h, err := libp2p.New(
 		libp2p.Identity(p2pPrivKey),
+		libp2p.NoTransports,                                 // Disable all default transports (including QUIC)
+		libp2p.Transport(tcp.NewTCPTransport),               // Explicitly only enable TCP for Tor routing
 		libp2p.ListenAddrStrings("/ip4/127.0.0.1/tcp/4001"), // Bind specifically to what torrc expects
 		libp2p.AddrsFactory(func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 			// Strip all local IP leakage and only present the Tor endpoint

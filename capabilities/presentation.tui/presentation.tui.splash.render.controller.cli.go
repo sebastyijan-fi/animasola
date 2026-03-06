@@ -51,7 +51,11 @@ func (m *TorSplashModel) listenForTor() tea.Cmd {
 		select {
 		case msg, ok := <-m.progressCh:
 			if !ok {
-				// Channel closed, which we configured to happen when 100% Bootstrap is reached
+				// Channel closed unexpectedly BEFORE we received the 100% signal!
+				// This mathematically means the C binary panicked or was killed.
+				return TorErrorMsg(fmt.Errorf("tor background process crashed unexpectedly before completing bootstrap"))
+			}
+			if string(msg) == "SUCCESS_100" {
 				return TorDoneMsg{}
 			}
 			return TorProgressMsg(msg)

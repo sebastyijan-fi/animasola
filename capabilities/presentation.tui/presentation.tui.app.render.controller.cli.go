@@ -7,7 +7,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	// ... existing imports ...
+	version "github.com/sebastyijan/animasola/capabilities/core.version"
 	keys "github.com/sebastyijan/animasola/capabilities/identity.keys"
+	http "github.com/sebastyijan/animasola/capabilities/network.http"
 	p2p "github.com/sebastyijan/animasola/capabilities/network.p2p"
 	tor "github.com/sebastyijan/animasola/capabilities/network.tor"
 	sqlite "github.com/sebastyijan/animasola/capabilities/storage.sqlite"
@@ -73,6 +75,25 @@ func (m *AppModel) checkIdentityCmd() tea.Cmd {
 
 type checkKeyMsg struct{}
 
+// checkUpdateCmd fires a background goroutine over Tor to see if a newer binary exists
+func (m *AppModel) checkUpdateCmd() tea.Cmd {
+	return func() tea.Msg {
+		release, err := http.FetchLatestRelease()
+		if err != nil {
+			// Fail silently, we don't want to spam users if GitHub/Tor acts up
+			return nil
+		}
+		if release.TagName != "" && release.TagName != version.Current {
+			return UpdateAvailableMsg{Version: release.TagName}
+		}
+		return nil
+	}
+}
+
+type UpdateAvailableMsg struct {
+	Version string
+}
+
 func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
@@ -107,6 +128,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(
 			m.checkIdentityCmd(),
 			m.listenForDiscovery(discoveryCh),
+			m.checkUpdateCmd(),
 		)
 
 	case checkKeyMsg:
@@ -172,22 +194,28 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case UpdateAvailableMsg:
+		// Route it directly to HomeView so it can display the banner
+		m.homeView.Update(msg)
+		return m, tea.Batch(cmds...)
+
 	}
 
 	// Route to active view
-	if m.currentView == "splash" {
+	switch m.currentView {
+	case "splash":
 		splashModel, cmd := m.splashView.Update(msg)
 		m.splashView = splashModel
 		cmds = append(cmds, cmd)
-	} else if m.currentView == "setup" {
+	case "setup":
 		setupModel, cmd := m.setupView.Update(msg)
 		m.setupView = setupModel.(*SetupModel)
 		cmds = append(cmds, cmd)
-	} else if m.currentView == "home" {
+	case "home":
 		homeModel, cmd := m.homeView.Update(msg)
 		m.homeView = homeModel.(*HomeModel)
 		cmds = append(cmds, cmd)
-	} else if m.currentView == "room" {
+	case "room":
 		roomModel, cmd := m.roomView.Update(msg)
 		m.roomView = roomModel.(*RoomModel)
 		cmds = append(cmds, cmd)
@@ -201,13 +229,14 @@ func (m *AppModel) View() string {
 		return "Initializing Display..."
 	}
 
-	if m.currentView == "splash" {
+	switch m.currentView {
+	case "splash":
 		return m.splashView.View()
-	} else if m.currentView == "setup" {
+	case "setup":
 		return m.setupView.View()
-	} else if m.currentView == "home" {
+	case "home":
 		return m.homeView.View()
-	} else if m.currentView == "room" {
+	case "room":
 		return m.roomView.View()
 	}
 

@@ -10,8 +10,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/sebastyijan/animasola/capabilities/network.p2p"
-	"github.com/sebastyijan/animasola/capabilities/storage.sqlite"
+	p2p "github.com/sebastyijan/animasola/capabilities/network.p2p"
+	sqlite "github.com/sebastyijan/animasola/capabilities/storage.sqlite"
 )
 
 func logTUIDebug(format string, a ...interface{}) {
@@ -235,7 +235,6 @@ func (m *RoomModel) View() string {
 		Border(lipgloss.NormalBorder(), false, false, true, false)
 
 	s.WriteString(headerStyle.Render(fmt.Sprintf("# %s", m.roomName)))
-	s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(fmt.Sprintf(" (ID: %s)", m.roomID)))
 	s.WriteString("\n\n")
 
 	if m.err != nil {

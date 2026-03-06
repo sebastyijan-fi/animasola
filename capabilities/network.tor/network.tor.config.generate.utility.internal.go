@@ -25,6 +25,11 @@ func GenerateConfig(configDir string, listenPort int, socksPort int) (*Config, e
 		return nil, fmt.Errorf("failed to create hidden service directory: %w", err)
 	}
 
+	// Purge orphaned lock files left behind by `SIGKILL` if Animasola was forcefully aborted previously.
+	// This prevents Tor from infinitely crashing by thinking another zombie process owns the sandbox.
+	dataDir := filepath.Join(torDir, "data")
+	_ = os.Remove(filepath.Join(dataDir, "lock"))
+
 	cfg := &Config{
 		SocksPort:         socksPort,
 		HiddenServiceDir:  hsDir,

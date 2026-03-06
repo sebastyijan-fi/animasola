@@ -130,15 +130,16 @@ func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if m.state == "disclaimer" {
+	switch m.state {
+	case "disclaimer":
 		model, cmd := m.disclaimerView.Update(msg)
 		m.disclaimerView = model.(*DisclaimerModel)
 		cmds = append(cmds, cmd)
-	} else if m.state == "profile" {
+	case "profile":
 		model, cmd := m.profileView.Update(msg)
 		m.profileView = model.(*ProfileModel)
 		cmds = append(cmds, cmd)
-	} else if m.state == "app" {
+	case "app":
 		model, cmd := m.appView.Update(msg)
 		m.appView = model.(*AppModel)
 		cmds = append(cmds, cmd)
@@ -153,14 +154,15 @@ func (m *RootModel) View() string {
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, errorContent)
 	}
 
-	if m.state == "disclaimer" {
+	switch m.state {
+	case "disclaimer":
 		return m.disclaimerView.View()
-	} else if m.state == "profile" {
+	case "profile":
 		return m.profileView.View()
-	} else if m.state == "bootstrapping" {
+	case "bootstrapping":
 		bootContent := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render("Provisioning Secure Local Environment...")
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, bootContent)
-	} else if m.state == "app" {
+	case "app":
 		return m.appView.View()
 	}
 

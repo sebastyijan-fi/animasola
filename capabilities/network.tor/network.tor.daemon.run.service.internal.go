@@ -27,7 +27,9 @@ func Start(ctx context.Context, binaryPath string, cfg *Config) (*Runner, <-chan
 
 	// Build the command
 	cmd := exec.CommandContext(r.ctx, binaryPath, "-f", cfg.TorrcPath) // #nosec G204 -- Binary path is strictly bound to Animasola AppData dir
-	cmd.Stderr = os.Stderr
+	// Capture stderr to file for debugging fatal Tor panics
+	errFile, _ := os.OpenFile("/tmp/tor_stderr.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	cmd.Stderr = errFile
 
 	// Prevent zombie Tor daemons across OS platforms
 	// See sysprocattr_linux.go and sysprocattr_others.go
@@ -56,23 +58,34 @@ func Start(ctx context.Context, binaryPath string, cfg *Config) (*Runner, <-chan
 		defer r.wg.Done()
 		defer close(progressCh)
 
+		// DEBUG: dump all of Tor's stdout
+		outLog, _ := os.OpenFile("/tmp/tor_stdout.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+		defer outLog.Close()
+
 		scanner := bufio.NewScanner(stdout)
+		bootstrapped := false
 		for scanner.Scan() {
 			line := scanner.Text()
+			outLog.WriteString(line + "\n")
 
-			// Only forward notice logs regarding bootstrap to the UI
-			if strings.Contains(line, "Bootstrapped") {
-				// Strip the timestamp and [notice] prefix for cleaner UI
-				parts := strings.Split(line, "[notice]")
-				if len(parts) > 1 {
-					progressCh <- strings.TrimSpace(parts[1])
-				} else {
-					progressCh <- line
+			if !bootstrapped {
+				// Only forward notice logs regarding bootstrap to the UI
+				if strings.Contains(line, "Bootstrapped") {
+					// Strip the timestamp and [notice] prefix for cleaner UI
+					parts := strings.Split(line, "[notice]")
+					if len(parts) > 1 {
+						progressCh <- strings.TrimSpace(parts[1])
+					} else {
+						progressCh <- line
+					}
 				}
-			}
 
-			if strings.Contains(line, "Bootstrapped 100% (done)") {
-				return // We don't need to parse logs after bootstrap
+				if strings.Contains(line, "Bootstrapped 100% (done)") {
+					progressCh <- "SUCCESS_100"
+					bootstrapped = true
+					// DO NOT return here! If we stop reading stdout, Tor's pipe fills up
+					// and Linux will send SIGPIPE, instantly killing the Tor anonymity engine!
+				}
 			}
 		}
 	}()

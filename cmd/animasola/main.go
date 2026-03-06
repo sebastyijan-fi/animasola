@@ -23,6 +23,13 @@ func main() {
 
 	ctx := context.Background()
 
+	// Phase 14.6: Secure CLI Auto-Updater
+	// Bypass the TUI entirely if the user invoked the 'update' command.
+	if len(os.Args) > 1 && os.Args[1] == "update" {
+		tui.RunAutoUpdater(ctx)
+		return
+	}
+
 	// Boot the Phase 14 Zero-Argument Root TUI Model
 	// This orchestrates the Consent Disclaimer, Profile generation, and deferred setup.
 	p := tui.Start(ctx)

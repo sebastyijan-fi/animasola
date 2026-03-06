@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -28,6 +30,14 @@ type RoomDiscoveredMsg struct {
 	Ch   chan sqlite.Room
 }
 
+type clearToastMsg struct{}
+
+func clearToastCmd() tea.Cmd {
+	return tea.Tick(time.Second*2, func(time.Time) tea.Msg {
+		return clearToastMsg{}
+	})
+}
+
 type HomeModel struct {
 	sqlite *sqlite.Store
 	user   *sqlite.User
@@ -43,6 +53,8 @@ type HomeModel struct {
 
 	creatingRoom      bool
 	joiningRoom       bool
+	showingInfo       bool // Whether the Room Info Modal is open
+	copiedToast       bool // True if the room ID was just copied
 	processing        bool
 	confirmingDelete  bool
 	roomNameInput     textinput.Model
@@ -51,6 +63,7 @@ type HomeModel struct {
 	joinPasswordInput textinput.Model
 	searchInput       textinput.Model
 	err               error
+	updateVersion     string
 }
 
 func NewHomeModel(s *sqlite.Store, u *sqlite.User, n *p2p.Node) *HomeModel {
@@ -129,6 +142,15 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	// A new version was found on GitHub!
+	case UpdateAvailableMsg:
+		m.updateVersion = msg.Version
+		return m, nil
+
+	case clearToastMsg:
+		m.copiedToast = false
+		return m, nil
+
 	case error:
 		m.err = msg
 		m.processing = false
@@ -204,6 +226,19 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.confirmingDelete = false
 			}
 			return m, nil
+		} else if m.showingInfo {
+			switch msg.String() {
+			case "c", "C":
+				if len(m.rooms) > 0 && m.index < len(m.rooms) {
+					_ = clipboard.WriteAll(m.rooms[m.index].ID)
+					m.copiedToast = true
+					cmds = append(cmds, clearToastCmd())
+				}
+				return m, tea.Batch(cmds...)
+			case "esc", "i", "enter":
+				m.showingInfo = false
+			}
+			return m, tea.Batch(cmds...)
 		} else if m.creatingRoom {
 			switch msg.String() {
 			case "esc":
@@ -370,6 +405,11 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, textinput.Blink)
 				cmds = append(cmds, m.FetchRooms()) // Refreshes list to show all for finding
 			case "i":
+				if len(m.rooms) > 0 {
+					m.showingInfo = true
+					m.copiedToast = false
+				}
+			case "p":
 				m.joiningRoom = true
 				m.joinIDInput.Focus()
 				cmds = append(cmds, textinput.Blink)
@@ -483,12 +523,18 @@ func (m *HomeModel) View() string {
 
 	if m.mode == "search" {
 		title := "🔍 Search / Join Public Rooms"
+		if m.updateVersion != "" {
+			s.WriteString(lipgloss.NewStyle().Background(lipgloss.Color("205")).Foreground(lipgloss.Color("232")).Bold(true).Render(fmt.Sprintf(" 🚀 UPDATE AVAILABLE: %s — Check GitHub Releases! ", m.updateVersion)) + "\n\n")
+		}
 		s.WriteString(styleHeader.Render(title))
 		s.WriteString("\n\n")
 		s.WriteString(m.searchInput.View())
 		s.WriteString("\n\n")
 	} else {
 		title := fmt.Sprintf("Welcome, %s", m.user.Username)
+		if m.updateVersion != "" {
+			s.WriteString(lipgloss.NewStyle().Background(lipgloss.Color("205")).Foreground(lipgloss.Color("232")).Bold(true).Render(fmt.Sprintf(" 🚀 UPDATE AVAILABLE: %s — Check GitHub Releases! ", m.updateVersion)) + "\n\n")
+		}
 		s.WriteString(styleHeader.Render(title))
 		s.WriteString("\n\n")
 	}
@@ -518,7 +564,12 @@ func (m *HomeModel) View() string {
 				unread = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render(" *New")
 			}
 
-			s.WriteString(fmt.Sprintf("%s %s%s\n", cursor, style.Render(r.Name), unread))
+			prefix := "#"
+			if r.IsPrivate {
+				prefix = "🔒"
+			}
+
+			s.WriteString(fmt.Sprintf("%s %s %s%s\n", cursor, lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(prefix), style.Render(r.Name), unread))
 		}
 	}
 
@@ -546,10 +597,37 @@ func (m *HomeModel) View() string {
 		s.WriteString("  Room ID:  " + m.joinIDInput.View() + "\n")
 		s.WriteString("  Password: " + m.joinPasswordInput.View() + "\n")
 		s.WriteString("  (tab to switch, esc to cancel, enter to submit)")
+	} else if m.showingInfo {
+		if len(m.rooms) > 0 {
+			r := m.rooms[m.index]
+			creatorText := "You created this room"
+			isOwner, err := m.sqlite.IsRoomOwner(context.Background(), m.user.ID, r.ID)
+			if err == nil && !isOwner {
+				creatorText = "You joined this room"
+			}
+			roomType := "Public Room"
+			if r.IsPrivate {
+				roomType = "Private Encrypted Room"
+			}
+
+			box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1, 2)
+			content := fmt.Sprintf("Room Details: %s\n\n%s\n%s\n\nInvitation ID (Share exactly):\n%s\n",
+				lipgloss.NewStyle().Bold(true).Render(r.Name),
+				lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(roomType),
+				lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(creatorText),
+				r.ID)
+
+			if m.copiedToast {
+				content += "\n  " + lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true).Render("(ID Copied to Clipboard!)")
+			} else {
+				content += "\n  [ Press 'c' to Copy ID to Clipboard ]"
+			}
+			s.WriteString(box.Render(content))
+		}
 	} else if m.mode == "search" {
 		s.WriteString("up/down (or tab): Navigate • esc: Back to Pinned • enter: Join selected (or exact name)")
 	} else {
-		s.WriteString("j/k: Navigate • enter: Open • s: Search • c: Create • i: Join by ID • x: Delete/Leave • q: Quit")
+		s.WriteString("j/k: Navigate • enter: Open • s: Search • c: Create • p: Join by ID • i: Room Info • x: Delete/Leave • q: Quit")
 	}
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, s.String())

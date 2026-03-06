@@ -64,6 +64,16 @@ You are done! You can now close your terminal, open a brand new one anywhere, an
 animasola
 ```
 
+### Step 6: Upgrading Animasola
+Since Animasola routes everything through Tor to hide your IP address, it provides a built-in Secure Auto-Updater that also runs exclusively over the Tor network. 
+
+When a new version is released, you will see a banner at the top of the chat: `🚀 UPDATE AVAILABLE`.
+To upgrade securely, simply close the app and run:
+```bash
+sudo animasola update
+```
+*(This command will spawn an anonymous Tor connection, download the latest version securely, and swap your executable file atomically!)*
+
 ---
 
 ## 🔐 What Happens When I Open It?
@@ -79,9 +89,10 @@ Because Animasola is built for extreme privacy, it works a little differently th
 
 Once you are in, you will see the Terminal User Interface! Use your keyboard to navigate:
 
-- **The Global Feed:** You will see messages flying by. This is the global public chat room.
-- **Search & Join:** Press `tab` on your keyboard to highlight the "Search" bar at the top. Type a word and press the `Up` and `Down` arrows on your keyboard to scroll through the rooms.
-- **Private Rooms:** If you create a "Private Room", it will give you a bizarre string of letters and numbers (like `ID: f47ac10b...`). Only people who you give this exact ID to can ever see or join the chat. It is mathematically hidden from the rest of the world!
+- **Navigation:** Press `j` and `k` (or `Up/Down` arrows) to scroll through your pinned and saved rooms. Press `Enter` to open a room.
+- **Search Public Rooms:** Press `s` on your keyboard to enter Search mode. Type any word to filter the list of public rooms discovered over the network. Use `tab` or arrows to select one and press `Enter` to join. Press `Esc` to cancel.
+- **Join by ID:** Press `i` to enter a specific Room ID if a friend gave you one privately out-of-band.
+- **Create Rooms:** Press `c` to create a new room. If you provide a password, it creates a "Private Room" and gives you a bizarre string of letters and numbers (like `ID: f47ac10b...`). Only people who you give this exact ID to can ever see or join the chat. It is mathematically hidden from the rest of the world!
 - **Offline Reading:** The app saves your chats locally in a tiny, compressed file on your computer. You can open `animasola` while on an airplane with no Wi-Fi, and you will still be able to read all your ancient chat history!
 
 ---
