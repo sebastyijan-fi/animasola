@@ -33,9 +33,18 @@ To tell your computer "Yes, I trust this exact file and I want to run it", we us
    ```
    *(The `+x` means "add executable permission". You just unlocked the file!)*
 
-**Advanced (Optional):** If you want to mathematically guarantee the file wasn't tampered with during download, you can open the `checksums.txt` file from the Releases page and type `sha256sum animasola-linux-amd64` in your terminal. If the long hashes match exactly, the file is 100% authentic.
+### Step 3: Verify the File is Safe (Optional but Recommended)
+Animasola is 100% open-source, which means anyone can read the code to guarantee it is completely safe. But what if you aren't a programmer?
 
-### Step 3: "Install" It So You Can Use It Anywhere
+You can use the industry-standard independent security tool **[VirusTotal](https://www.virustotal.com/)**:
+1. Go to **VirusTotal.com** in your web browser.
+2. Drag and drop the downloaded `animasola` file onto the website.
+3. VirusTotal will analyze the file using over 70 different antivirus engines (from Microsoft, Google, BitDefender, etc.).
+4. If it comes back clean (0 flags), you have 100% independent proof that the file is safe to open!
+
+**Advanced Users:** We also provide a `checksums.txt` file on the Releases page. You can run `sha256sum animasola-linux-amd64` in your terminal to mathematically guarantee the file wasn't tampered with during the download.
+
+### Step 4: "Install" It So You Can Use It Anywhere
 Right now, you can only run the app if you are sitting inside your Downloads folder. That is annoying! 
 
 We want you to be able to open a terminal *anywhere* and just type `animasola` to launch it. To do this, we are going to move the file into a special hidden folder on your computer designed specifically for terminal apps (called `/usr/local/bin`).
@@ -48,7 +57,7 @@ We want you to be able to open a terminal *anywhere* and just type `animasola` t
 
 *(What did we just do? `sudo` means "give me admin powers". `mv` means "move". We moved the file out of your Downloads folder, into `/usr/local/bin`, and renamed it simply to `animasola`!)*
 
-### Step 4: Launch It!
+### Step 5: Launch It!
 You are done! You can now close your terminal, open a brand new one anywhere, and simply type:
 
 ```bash
