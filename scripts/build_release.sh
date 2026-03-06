@@ -27,5 +27,10 @@ echo "Building macOS arm64..."
 GOOS=darwin GOARCH=arm64 go build -o releases/animasola-darwin-arm64 cmd/animasola/main.go
 
 echo "================================================="
-echo "Done! Upload these 4 binaries to the GitHub 'Releases' page."
-echo "(Remember to advise users to run \`chmod +x animasola-*\` after downloading)"
+echo "Generating SHA256 checksums for security verification..."
+cd releases
+sha256sum animasola-* > checksums.txt
+cd ..
+
+echo "================================================="
+echo "Done! Upload the 4 binaries AND checksums.txt to the GitHub 'Releases' page."

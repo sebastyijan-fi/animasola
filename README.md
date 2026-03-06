@@ -17,8 +17,10 @@ Here is exactly how to get it running on your Mac or Linux computer.
    * **Mac users (Older Intel chips):** Download `animasola-darwin-amd64`
    * **Linux users:** Download `animasola-linux-amd64`
 
-### Step 2: Allow Your Computer to Run It
-When you download a file from the internet, your computer automatically protects you by making it "un-clickable" as a program. We need to tell your computer that it is safe to execute.
+### Step 2: Grant Security Permission (Why do we do this?)
+When you download a file from the internet, Mac and Linux computers **automatically lock it** to protect you from accidental viruses. If you try to double-click it, it will refuse to run. 
+
+To tell your computer "Yes, I trust this exact file and I want to run it", we use a security command called `chmod` (Change Mode).
 
 1. Open your **Terminal** app.
 2. Navigate to your Downloads folder by typing this and pressing Enter:
@@ -29,7 +31,9 @@ When you download a file from the internet, your computer automatically protects
    ```bash
    chmod +x animasola-linux-amd64
    ```
-   *(This `chmod +x` command stands for "change mode: executable". It simply tells your computer "Yes, I want to allow this file to run as a program.")*
+   *(The `+x` means "add executable permission". You just unlocked the file!)*
+
+**Advanced (Optional):** If you want to mathematically guarantee the file wasn't tampered with during download, you can open the `checksums.txt` file from the Releases page and type `sha256sum animasola-linux-amd64` in your terminal. If the long hashes match exactly, the file is 100% authentic.
 
 ### Step 3: "Install" It So You Can Use It Anywhere
 Right now, you can only run the app if you are sitting inside your Downloads folder. That is annoying! 
