@@ -282,11 +282,11 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchInput.Blur()
 				m.searchInput.SetValue("")
 				return m, m.FetchRooms()
-			case "up":
+			case "up", "shift+tab":
 				if m.index > 0 {
 					m.index--
 				}
-			case "down":
+			case "down", "tab":
 				if m.index < len(m.rooms)-1 {
 					m.index++
 				}
@@ -314,11 +314,17 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			default:
 				var cmd tea.Cmd
+				oldQuery := strings.ToLower(strings.TrimSpace(m.searchInput.Value()))
 				m.searchInput, cmd = m.searchInput.Update(msg)
 				cmds = append(cmds, cmd)
 
 				// Re-filter locally so we don't query DB on every keystroke
 				query := strings.ToLower(strings.TrimSpace(m.searchInput.Value()))
+
+				// If the query changed, reset the cursor to the top of the suggestions!
+				if query != oldQuery {
+					m.index = 0
+				}
 				var filtered []sqlite.Room
 				for _, r := range m.allPublicRooms {
 					if query == "" || strings.Contains(strings.ToLower(r.Name), query) {
@@ -541,7 +547,7 @@ func (m *HomeModel) View() string {
 		s.WriteString("  Password: " + m.joinPasswordInput.View() + "\n")
 		s.WriteString("  (tab to switch, esc to cancel, enter to submit)")
 	} else if m.mode == "search" {
-		s.WriteString("up/down: Navigate • esc: Back to Pinned • enter: Join selected (or exact name)")
+		s.WriteString("up/down (or tab): Navigate • esc: Back to Pinned • enter: Join selected (or exact name)")
 	} else {
 		s.WriteString("j/k: Navigate • enter: Open • s: Search • c: Create • i: Join by ID • x: Delete/Leave • q: Quit")
 	}
