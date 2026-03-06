@@ -2,6 +2,7 @@ package sqlite_test
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -132,5 +133,67 @@ func TestPublicRoomMetadataVersioning(t *testing.T) {
 	}
 	if rooms[0].Version != 2 {
 		t.Fatalf("expected newer version 2 to survive, got %d", rooms[0].Version)
+	}
+}
+
+func TestMigrateLegacyRoomsSchemaBeforeLastSeenAt(t *testing.T) {
+	configDir := t.TempDir()
+	dbPath := filepath.Join(configDir, "legacy.db")
+
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("open legacy sqlite: %v", err)
+	}
+	defer db.Close()
+
+	legacySchema := `
+	CREATE TABLE users (
+		id TEXT PRIMARY KEY,
+		username TEXT NOT NULL UNIQUE,
+		created_at TEXT NOT NULL
+	);
+	CREATE TABLE rooms (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL UNIQUE,
+		description TEXT,
+		created_at TEXT NOT NULL
+	);
+	CREATE TABLE memberships (
+		user_id TEXT NOT NULL,
+		room_id TEXT NOT NULL,
+		role TEXT NOT NULL,
+		joined_at TEXT NOT NULL,
+		PRIMARY KEY (user_id, room_id)
+	);
+	CREATE TABLE messages (
+		id TEXT PRIMARY KEY,
+		room_id TEXT NOT NULL,
+		author_id TEXT NOT NULL,
+		content TEXT NOT NULL,
+		created_at TEXT NOT NULL
+	);`
+	if _, err := db.Exec(legacySchema); err != nil {
+		t.Fatalf("seed legacy schema: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO rooms (id, name, description, created_at) VALUES ('room1', 'legacy', 'desc', '2026-03-07T00:00:00Z')`); err != nil {
+		t.Fatalf("seed legacy room: %v", err)
+	}
+
+	store, err := sqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate legacy schema: %v", err)
+	}
+
+	room, err := store.GetRoom(context.Background(), "room1")
+	if err != nil {
+		t.Fatalf("load migrated room: %v", err)
+	}
+	if room.Name != "legacy" {
+		t.Fatalf("expected legacy room to survive migration, got %q", room.Name)
 	}
 }

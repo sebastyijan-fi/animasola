@@ -52,9 +52,3 @@ CREATE TABLE IF NOT EXISTS messages (
 	FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE,
 	FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE
 );
-
-CREATE INDEX IF NOT EXISTS idx_messages_room_created_at ON messages(room_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_memberships_user_room ON memberships(user_id, room_id);
-CREATE INDEX IF NOT EXISTS idx_memberships_room_user ON memberships(room_id, user_id);
-CREATE INDEX IF NOT EXISTS idx_rooms_public_last_seen ON rooms(is_private, last_seen_at, name);
-CREATE INDEX IF NOT EXISTS idx_public_room_index_last_seen ON public_room_index(last_seen_at, name);
