@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 )
 
 type Runner struct {
@@ -30,12 +29,9 @@ func Start(ctx context.Context, binaryPath string, cfg *Config) (*Runner, <-chan
 	cmd := exec.CommandContext(r.ctx, binaryPath, "-f", cfg.TorrcPath) // #nosec G204 -- Binary path is strictly bound to Animasola AppData dir
 	cmd.Stderr = os.Stderr
 
-	// Linux Kernel Hack: Pdeathsig guarantees that if the parent (Animasola) dies ungracefully
-	// (e.g. kill -9), the kernel will immediately deliver SIGKILL to the Tor child process,
-	// preventing a zombie daemon from haunting the background and blocking future boots.
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Pdeathsig: syscall.SIGKILL,
-	}
+	// Prevent zombie Tor daemons across OS platforms
+	// See sysprocattr_linux.go and sysprocattr_others.go
+	setSysProcAttr(cmd)
 
 	// Inject Library paths so Tor can find libssl.so and libevent.so
 	torDir := filepath.Dir(binaryPath)
