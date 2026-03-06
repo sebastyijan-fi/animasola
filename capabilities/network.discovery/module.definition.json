@@ -1,0 +1,4 @@
+{
+  "capability": "network.discovery",
+  "description": "Signed public-room discovery, refresh, and publisher orchestration."
+}

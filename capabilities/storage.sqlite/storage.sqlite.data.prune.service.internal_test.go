@@ -2,7 +2,6 @@ package sqlite
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,12 +9,8 @@ import (
 
 func TestDataPruningRetention(t *testing.T) {
 	username := "test_agent_gamma_" + time.Now().Format("150405")
-	homeDir, _ := os.UserHomeDir()
-	configDir := filepath.Join(homeDir, ".config", "animasola", username)
-	os.MkdirAll(configDir, 0700)
+	configDir := t.TempDir()
 	dbPath := filepath.Join(configDir, "animasola.db")
-
-	defer os.RemoveAll(configDir)
 
 	// Boot
 	store, err := Open(dbPath)
@@ -27,7 +22,8 @@ func TestDataPruningRetention(t *testing.T) {
 		t.Fatalf("Failed to migrate SQLite schema: %v", err)
 	}
 
-	user, _ := store.GetOrCreateUser(ctx, username)
+	explicitID := "test_explicit_id"
+	user, _ := store.GetOrCreateUser(ctx, username, explicitID)
 
 	// Create a Public Room and a Private Room
 	pubRoom, _ := store.CreateRoom(ctx, "Public Decay", "Should Delete", user.ID, false, "")

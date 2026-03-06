@@ -1,20 +1,24 @@
 package tui
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	version "github.com/sebastyijan/animasola/capabilities/core.version"
 	httpcap "github.com/sebastyijan/animasola/capabilities/network.http"
-	tor "github.com/sebastyijan/animasola/capabilities/network.tor"
 )
 
 // RunAutoUpdater handles the `animasola update` CLI execution.
-// It bypasses the TUI to perform a system-level atomic binary swap over Tor.
+// It bypasses the TUI to perform a system-level atomic binary swap.
 func RunAutoUpdater(ctx context.Context) {
+	_ = ctx
 	fmt.Println("🚀 Initializing Animasola Secure Auto-Updater...")
 
 	// 1. Resolve Active Executable
@@ -61,98 +65,204 @@ func RunAutoUpdater(ctx context.Context) {
 		fmt.Printf("❌ Unsupported architecture: %s/%s\n", runtime.GOOS, runtime.GOARCH)
 		os.Exit(1)
 	}
+	bundleAssetName := assetName + ".tar.gz"
 
-	// 4. Trigger Ephemeral Tor daemon
 	fmt.Printf("✅ Pre-flight checks passed! Target platform: %s\n", assetName)
-	fmt.Println("\n⏳ Spawning Ephemeral Tor Sandbox for Anonymity...")
-
-	ephemeralDir := filepath.Join(os.TempDir(), "animasola-tmp-updater")
-	if err := os.MkdirAll(ephemeralDir, 0700); err != nil {
-		fmt.Printf("❌ Failed to create temporary Tor sandbox: %v\n", err)
-		os.Exit(1)
-	}
-
-	torBinary, err := tor.EnsureTorBinary(ephemeralDir)
-	if err != nil {
-		fmt.Printf("❌ Failed to extract Tor executable: %v\n", err)
-		os.Exit(1)
-	}
-
-	torConfig, err := tor.GenerateConfig(ephemeralDir, 4001, 48099)
-	if err != nil {
-		fmt.Printf("❌ Failed to configure Tor daemon: %v\n", err)
-		os.Exit(1)
-	}
-
-	torRunner, progressCh, err := tor.Start(ctx, torBinary, torConfig)
-	if err != nil {
-		fmt.Printf("❌ Failed to spawn Tor engine: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Wait for Tor to hit 100% Bootstrap
-	for msg := range progressCh {
-		if msg == "SUCCESS_100" {
-			break
-		}
-	}
-
-	// 5. Inject Ephemeral SOCKS proxy for HTTP Client
-	socksAddr := fmt.Sprintf("socks5://127.0.0.1:%d", torConfig.SocksPort)
-	os.Setenv("ALL_PROXY", socksAddr)
-
-	fmt.Println("🌐 Querying latest version over Tor circuit...")
+	fmt.Println("\n🌐 Querying latest version...")
 	release, err := httpcap.FetchLatestRelease()
 	if err != nil {
-		fmt.Printf("❌ Failed to reach GitHub via Tor: %v\n", err)
-		torRunner.Stop()
+		fmt.Printf("❌ Failed to reach GitHub: %v\n", err)
 		os.Exit(1)
 	}
 
 	// 6. Compare Version
 	if release.TagName == version.Current {
 		fmt.Printf("✓ You are already on the latest version (%s). No update required.\n", version.Current)
-		torRunner.Stop()
-		_ = os.RemoveAll(ephemeralDir)
 		os.Exit(0)
 	}
 
-	downloadURL := fmt.Sprintf("https://github.com/sebastyijan-fi/animasola/releases/download/%s/%s", release.TagName, assetName)
+	downloadURL := fmt.Sprintf("https://github.com/sebastyijan-fi/animasola/releases/download/%s/%s", release.TagName, bundleAssetName)
 	fmt.Printf("📦 Downloading encrypted payload: %s\n", release.TagName)
 
-	tmpDownloadedBinary := filepath.Join(execDir, "animasola.new")
-	err = httpcap.DownloadReleaseAsset(downloadURL, tmpDownloadedBinary)
+	tmpDir, err := os.MkdirTemp("", "animasola-updater-*")
+	if err != nil {
+		fmt.Printf("❌ Failed to allocate temporary update directory: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tmpDownloadedBundle := filepath.Join(tmpDir, bundleAssetName)
+	err = httpcap.DownloadReleaseAsset(downloadURL, tmpDownloadedBundle)
 	if err != nil {
 		fmt.Printf("❌ Downloading binary failed: %v\n", err)
-		_ = os.Remove(tmpDownloadedBinary)
-		torRunner.Stop()
 		os.Exit(1)
 	}
 
-	// 7. Make the new binary executable safely before swapping
-	if err := os.Chmod(tmpDownloadedBinary, 0755); err != nil {
-		fmt.Printf("❌ Failed to set execution permissions: %v\n", err)
-		_ = os.Remove(tmpDownloadedBinary)
-		torRunner.Stop()
-		os.Exit(1)
-	}
-
-	// 8. Atomic Swap
-	// Using os.Rename guarantees that the `animasola` command will never
-	// briefly cease to exist while we write bytes from the internet.
-	err = os.Rename(tmpDownloadedBinary, execPath)
+	bundleDir, err := extractBundle(tmpDownloadedBundle, tmpDir)
 	if err != nil {
-		fmt.Printf("❌ Atomic OS Swap failed. The old binary is untouched. Err: %v\n", err)
-		_ = os.Remove(tmpDownloadedBinary)
-		torRunner.Stop()
+		fmt.Printf("❌ Failed to extract release bundle: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 9. Graceful Teardown
-	torRunner.Stop()
-	_ = os.RemoveAll(ephemeralDir) // Wipe Tor's temporary sandbox keys and lockfiles
+	if isBundledInstall(execDir) {
+		if err := replaceInstallRoot(execDir, bundleDir); err != nil {
+			fmt.Printf("❌ Failed to replace bundled install: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		tmpDownloadedBinary := filepath.Join(execDir, "animasola.new")
+		if err := copyFile(filepath.Join(bundleDir, "animasola"), tmpDownloadedBinary, 0755); err != nil {
+			fmt.Printf("❌ Failed to stage updated binary: %v\n", err)
+			os.Exit(1)
+		}
+		if err := os.Rename(tmpDownloadedBinary, execPath); err != nil {
+			fmt.Printf("❌ Atomic OS Swap failed. The old binary is untouched. Err: %v\n", err)
+			_ = os.Remove(tmpDownloadedBinary)
+			os.Exit(1)
+		}
+	}
 
 	fmt.Printf("\n✨ Successfully upgraded payload to %s!\n", release.TagName)
 	fmt.Println("Type 'animasola' to launch the secure application.")
 	os.Exit(0)
+}
+
+func isBundledInstall(execDir string) bool {
+	if _, err := os.Stat(filepath.Join(execDir, "tor")); err == nil {
+		return true
+	}
+	if strings.Contains(execDir, string(filepath.Separator)+"animasola") {
+		return true
+	}
+	return false
+}
+
+func replaceInstallRoot(targetDir, bundleDir string) error {
+	parentDir := filepath.Dir(targetDir)
+	stagingDir := filepath.Join(parentDir, ".animasola-update")
+	backupDir := filepath.Join(parentDir, ".animasola-backup")
+
+	_ = os.RemoveAll(stagingDir)
+	_ = os.RemoveAll(backupDir)
+
+	if err := copyDir(bundleDir, stagingDir); err != nil {
+		return err
+	}
+	if err := os.Rename(targetDir, backupDir); err != nil {
+		return err
+	}
+	if err := os.Rename(stagingDir, targetDir); err != nil {
+		_ = os.Rename(backupDir, targetDir)
+		return err
+	}
+	_ = os.RemoveAll(backupDir)
+	return nil
+}
+
+func extractBundle(archivePath, workDir string) (string, error) {
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	gzr, err := gzip.NewReader(file)
+	if err != nil {
+		return "", err
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+	var rootDir string
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+
+		targetPath := filepath.Join(workDir, header.Name)
+		cleanTarget := filepath.Clean(targetPath)
+		if !strings.HasPrefix(cleanTarget, filepath.Clean(workDir)+string(filepath.Separator)) {
+			return "", fmt.Errorf("refusing to extract outside temp dir: %s", header.Name)
+		}
+
+		if rootDir == "" {
+			parts := strings.Split(header.Name, string(filepath.Separator))
+			if len(parts) > 0 {
+				rootDir = filepath.Join(workDir, parts[0])
+			}
+		}
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(cleanTarget, 0755); err != nil {
+				return "", err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(cleanTarget), 0755); err != nil {
+				return "", err
+			}
+			mode := os.FileMode(header.Mode)
+			if mode == 0 {
+				mode = 0644
+			}
+			out, err := os.OpenFile(cleanTarget, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+			if err != nil {
+				return "", err
+			}
+			if _, err := io.Copy(out, tr); err != nil {
+				out.Close()
+				return "", err
+			}
+			if err := out.Close(); err != nil {
+				return "", err
+			}
+		}
+	}
+
+	if rootDir == "" {
+		return "", fmt.Errorf("release bundle was empty")
+	}
+	return rootDir, nil
+}
+
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		targetPath := filepath.Join(dst, relPath)
+		if info.IsDir() {
+			return os.MkdirAll(targetPath, info.Mode())
+		}
+		return copyFile(path, targetPath, info.Mode())
+	})
+}
+
+func copyFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }

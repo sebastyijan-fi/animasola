@@ -1,26 +1,35 @@
 package tui
 
 import (
+	"context"
 	"fmt"
+	"runtime"
+	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	// ... existing imports ...
 	version "github.com/sebastyijan/animasola/capabilities/core.version"
 	keys "github.com/sebastyijan/animasola/capabilities/identity.keys"
+	discovery "github.com/sebastyijan/animasola/capabilities/network.discovery"
 	http "github.com/sebastyijan/animasola/capabilities/network.http"
 	p2p "github.com/sebastyijan/animasola/capabilities/network.p2p"
+	telemetry "github.com/sebastyijan/animasola/capabilities/network.telemetry"
 	tor "github.com/sebastyijan/animasola/capabilities/network.tor"
 	sqlite "github.com/sebastyijan/animasola/capabilities/storage.sqlite"
 )
 
 type AppModel struct {
-	sqlite    *sqlite.Store
-	user      *sqlite.User
-	keys      *keys.Keys
-	torConfig *tor.Config
-	node      *p2p.Node
+	sqlite     *sqlite.Store
+	user       *sqlite.User
+	keys       *keys.Keys
+	torConfig  *tor.Config
+	torProcess *tor.Runner
+	node       *p2p.Node
+	discovery  *discovery.Service
 
 	width  int
 	height int
@@ -30,20 +39,35 @@ type AppModel struct {
 	setupView   *SetupModel
 	homeView    *HomeModel
 	roomView    *RoomModel
+
+	torStartTime time.Time // Tracks when Tor began bootstrapping
+	appVersion   string
+
+	// Phase 21: Real-Time Performance HUD state
+	showDebugHUD    bool
+	latestTelemetry []telemetry.TelemetryEvent
+	telemetryFeed   chan telemetry.TelemetryEvent
 }
 
-func NewAppModel(s *sqlite.Store, u *sqlite.User, keys *keys.Keys, torConfig *tor.Config, torProgressCh <-chan string) *AppModel {
+func NewAppModel(s *sqlite.Store, u *sqlite.User, keys *keys.Keys, torConfig *tor.Config, torProcess *tor.Runner, torStartTime time.Time, torProgressCh <-chan string, appVersion string) *AppModel {
 	m := &AppModel{
-		sqlite:      s,
-		user:        u,
-		keys:        keys,
-		torConfig:   torConfig,
-		node:        nil,      // We don't have a node yet!
-		currentView: "splash", // Boot into Tor waitscreen by default
-		splashView:  NewTorSplashModel(torProgressCh),
-		setupView:   NewSetupModel(),
-		homeView:    NewHomeModel(s, u, nil), // Passed as nil initially
-		roomView:    NewRoomModel(s, u, nil), // Passed as nil initially
+		sqlite:       s,
+		user:         u,
+		keys:         keys,
+		torConfig:    torConfig,
+		torProcess:   torProcess,
+		node:         nil,      // We don't have a node yet!
+		currentView:  "splash", // Boot into Tor waitscreen by default
+		splashView:   NewTorSplashModel(torProgressCh),
+		setupView:    NewSetupModel(),
+		homeView:     NewHomeModel(s, u, nil, nil), // Passed as nil initially
+		roomView:     NewRoomModel(s, u, nil, nil), // Passed as nil initially
+		appVersion:   appVersion,
+		torStartTime: torStartTime,
+
+		showDebugHUD:    false,
+		latestTelemetry: make([]telemetry.TelemetryEvent, 0, 5),
+		telemetryFeed:   make(chan telemetry.TelemetryEvent, 10),
 	}
 	return m
 }
@@ -57,9 +81,22 @@ func (m *AppModel) SetSize(w, h int) {
 	m.roomView.SetSize(w, h)
 }
 
+func (m *AppModel) Shutdown() {
+	if m.discovery != nil {
+		_ = m.discovery.Close()
+	}
+	if m.node != nil {
+		m.node.Close()
+	}
+	if m.torProcess != nil {
+		m.torProcess.Stop()
+	}
+}
+
 func (m *AppModel) Init() tea.Cmd {
 	return tea.Batch(
 		m.splashView.Init(), // Start ripping through Tor logs
+		m.listenForTelemetry(),
 		textinput.Blink,
 	)
 }
@@ -100,6 +137,8 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case TorDoneMsg:
 		// Tor has successfully bootstrapped to 100%!
+		torBootDuration := int(time.Since(m.torStartTime).Milliseconds())
+
 		// 1. Extract the hidden service .onion address that was just written to disk
 		onionAddr, err := m.torConfig.GetOnionAddress()
 		if err != nil {
@@ -107,21 +146,36 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// 2. Initialize the P2P Network Node dynamically
-		node, err := p2p.NewNode(m.keys, onionAddr)
+		node, err := p2p.NewNode(m.keys, onionAddr, m.torConfig.HiddenServicePort)
 		if err != nil {
 			return m, func() tea.Msg { return TorErrorMsg(fmt.Errorf("error starting p2p node: %w", err)) }
 		}
 		m.node = node
 
 		// 3. Inject the active node into the UI panels
+		m.discovery = discovery.NewService(node, m.sqlite, m.user)
 		m.homeView.SetNode(node)
+		m.homeView.SetDiscovery(m.discovery)
 		m.roomView.SetNode(node)
+		m.roomView.SetDiscovery(m.discovery)
 
 		// 4. Start Global Discovery over the Kademlia DHT
-		// We'll pass a channel to receive discovered rooms async
-		discoveryCh := make(chan sqlite.Room)
-		if err := node.StartGlobalDiscovery(m.sqlite, discoveryCh); err != nil {
+		// We'll pass a buffered channel to receive discovered rooms async
+		// A buffer of 100 ensures the background Tor Tor daemon never drops messages
+		// via its non-blocking select even if the Bubbletea UI is busy rendering.
+		discoveryCh := make(chan sqlite.Room, 100)
+		if err := m.discovery.Start(discoveryCh); err != nil {
 			// Non-fatal, just log or ignore
+		}
+
+		// Phase 20: Emit the asynchronous Tor Boot Telemetry.
+		if m.node.Telemetry != nil {
+			// Wire the global Telemetry engine to dual-route metrics to our local HUD buffer!
+			m.node.Telemetry.SetLocalInterceptor(m.telemetryFeed)
+
+			m.node.Telemetry.RecordEvent(context.Background(), "Tor_Bootstrap_Latency", torBootDuration, map[string]string{
+				"action": "app_startup",
+			}, runtime.GOOS, runtime.GOARCH)
 		}
 
 		// Fall through to checking the user's cryptographic identity layer
@@ -140,6 +194,21 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Show setup explicitly to await consent before generating.
 		m.currentView = "setup"
 		return m, m.setupView.Init()
+
+	case error:
+		// UX HARDENING: If the RoomModel's subscribeToTopicCmd throws a DHT timeout error
+		// (e.g. joining a ghost room), we must catch it here, obliterate the SQLite record
+		// so it doesn't stay pinned, and kick the user back to the Home view with the error string.
+		if m.currentView == "room" {
+			failedRoomID := m.roomView.roomID
+			if failedRoomID != "" {
+				_ = m.sqlite.DeleteRoom(context.Background(), failedRoomID)
+			}
+			m.currentView = "home"
+			m.homeView.err = msg
+			cmds = append(cmds, m.homeView.Init())
+		}
+		return m, tea.Batch(cmds...)
 
 	case TryGenerateKeyMsg:
 		// The Setup view asked us to generate the key in the background
@@ -162,6 +231,10 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
+		if (msg.String() == "ctrl+e" || msg.String() == "f12") && m.currentView != "splash" {
+			m.showDebugHUD = !m.showDebugHUD
+			return m, nil
+		}
 		if msg.String() == "esc" && m.currentView == "room" {
 			// Explicitly tear down the libp2p pubsub subscription so it doesn't
 			// continue draining Tor bandwidth or CPU in the background!
@@ -182,17 +255,30 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case OpenRoomMsg:
 		m.currentView = "room"
-		cmds = append(cmds, m.roomView.OpenRoom(msg.RoomID, msg.RoomName, msg.IsPrivate, msg.RoomKey))
+		cmds = append(cmds, m.roomView.OpenRoom(msg.RoomID, msg.RoomName, msg.IsPrivate, msg.RoomKey, msg.RequireDHT))
 		return m, tea.Batch(cmds...)
 	case RoomDiscoveredMsg:
 		// Received from the async global discovery channel
-		// Pass it down to the HomeView so it can update the search list
-		m.homeView.Update(msg)
+		// Route the update Idiomatically down to HomeView
+		model, cmd := m.homeView.Update(msg)
+		m.homeView = model.(*HomeModel)
+		cmds = append(cmds, cmd)
+
 		// We MUST re-queue the listener to block for the next discovery hit!
 		if msg.Ch != nil {
 			cmds = append(cmds, m.listenForDiscovery(msg.Ch))
 		}
 		return m, tea.Batch(cmds...)
+
+	case telemetry.TelemetryEvent:
+		// Push to a bounded 5-element ring buffer
+		if len(m.latestTelemetry) >= 5 {
+			m.latestTelemetry = m.latestTelemetry[1:]
+		}
+		m.latestTelemetry = append(m.latestTelemetry, msg)
+
+		// Immediately queue the listener to catch the next fast-flowing metric!
+		return m, m.listenForTelemetry()
 
 	case UpdateAvailableMsg:
 		// Route it directly to HomeView so it can display the banner
@@ -229,18 +315,62 @@ func (m *AppModel) View() string {
 		return "Initializing Display..."
 	}
 
+	var activeView string
 	switch m.currentView {
 	case "splash":
-		return m.splashView.View()
+		return m.splashView.View() // Never overlay Tor Splash screens
 	case "setup":
-		return m.setupView.View()
+		activeView = m.setupView.View()
 	case "home":
-		return m.homeView.View()
+		activeView = m.homeView.View()
 	case "room":
-		return m.roomView.View()
+		activeView = m.roomView.View()
 	}
 
-	return fmt.Sprintf("Unknown view: %s", m.currentView)
+	if !m.showDebugHUD {
+		return activeView
+	}
+
+	// ---------------------------------------------------------
+	// PHASE 21: Real-Time Performance Telemetry HUD Compiler
+	// ---------------------------------------------------------
+	hudTitle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Render("ANALYTICS: Global Telemetry Stream")
+	var metrics []string
+	if len(m.latestTelemetry) == 0 {
+		metrics = append(metrics, lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render("No cryptographic or routing pings resolved yet..."))
+	} else {
+		for i := len(m.latestTelemetry) - 1; i >= 0; i-- { // Reverse chron
+			evt := m.latestTelemetry[i]
+			title := lipgloss.NewStyle().Foreground(lipgloss.Color("12")).Render(evt.EventName)
+			ms := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("2")).Render(fmt.Sprintf("%dms", evt.Duration))
+			metrics = append(metrics, fmt.Sprintf("%-35s %s", title, ms))
+		}
+	}
+
+	hudBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("240")).
+		Padding(1, 4).
+		Render(lipgloss.JoinVertical(lipgloss.Left, hudTitle, "\n"+strings.Join(metrics, "\n")))
+
+	// Composite the HUD float absolutely over the Top-Right of the active Bubbletea buffer
+	return lipgloss.Place(m.width, m.height, lipgloss.Right, lipgloss.Top, hudBox) +
+		"\n\033[" + fmt.Sprintf("%d", m.height) + "A\033[" + fmt.Sprintf("%d", m.width) + "D" + activeView
+	// 	 ^ ANSI escape sequences forcibly rewind the cursor to draw the main UI UNDER the floating HUD.
+}
+
+// listenForTelemetry attaches the HUD buffer to the Global GossipSub Telemetry stream
+func (m *AppModel) listenForTelemetry() tea.Cmd {
+	return func() tea.Msg {
+		if m.telemetryFeed == nil {
+			return nil
+		}
+		evt, ok := <-m.telemetryFeed
+		if !ok {
+			return nil
+		}
+		return evt
+	}
 }
 
 // listenForDiscovery converts Go channel messages into native Bubbletea Msgs

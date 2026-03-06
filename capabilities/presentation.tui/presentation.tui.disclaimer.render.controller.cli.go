@@ -53,8 +53,8 @@ func (m *DisclaimerModel) View() string {
 	styleBtn := lipgloss.NewStyle().Padding(0, 2).Border(lipgloss.NormalBorder())
 	styleBtnActive := styleBtn.Copy().BorderForeground(lipgloss.Color("205")).Foreground(lipgloss.Color("205")).Bold(true)
 
-	header := styleHeader.Render("⚠️  TERMINAL DEPLOYMENT WARNING ⚠️")
-	text := styleText.Render("Animasola operates over the Tor anonymity network and generates local Ed25519 cryptographic keys that never leave this device.\n\nBy proceeding, you consent to the embedded Tor daemon actively routing packets through your local network environment.")
+	header := styleHeader.Render("Private Network Consent")
+	text := styleText.Render("Animasola includes Tor internally for private network routing and generates local Ed25519 identity keys that never leave this device.\n\nBy proceeding, you consent to Animasola starting its built-in private network runtime.")
 
 	var btnAccept, btnDecline string
 	if m.cursor == 0 {

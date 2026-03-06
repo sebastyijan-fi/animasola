@@ -15,6 +15,7 @@ import (
 // SortableTimeFormat zero-pads fractional seconds to 9 digits to guarantee stable string lengths,
 // preventing SQLite's lexicographical sorting from erroneously evaluating "Z" as greater than ".".
 const SortableTimeFormat = "2006-01-02T15:04:05.000000000Z"
+const publicRoomFreshnessTTL = 24 * time.Hour
 
 // StartDataPruning runs a background goroutine that deletes messages older than the retention period.
 func (s *Store) StartDataPruning(ctx context.Context, retention time.Duration) {
@@ -23,6 +24,7 @@ func (s *Store) StartDataPruning(ctx context.Context, retention time.Duration) {
 		defer ticker.Stop()
 
 		s.pruneOldMessages(retention) // Run immediately on startup
+		_ = s.PruneStalePublicRooms(ctx, retention)
 
 		for {
 			select {
@@ -30,6 +32,7 @@ func (s *Store) StartDataPruning(ctx context.Context, retention time.Duration) {
 				return
 			case <-ticker.C:
 				s.pruneOldMessages(retention)
+				_ = s.PruneStalePublicRooms(ctx, retention)
 			}
 		}
 	}()
@@ -54,28 +57,41 @@ func (s *Store) pruneOldMessages(retention time.Duration) {
 
 	if rows, err := res.RowsAffected(); err == nil && rows > 0 {
 		fmt.Printf("[Store] Pruned %d old messages from Public Rooms (Retention: %v)\n", rows, retention)
-
-		// If we deleted a significant amount of data, actively shrink the database file
-		if rows > 1000 {
-			fmt.Printf("[Store] Highwater mark reached. Executing VACUUM to compact database SSD footprint...\n")
-			if _, vacErr := s.db.Exec(`VACUUM`); vacErr != nil {
-				fmt.Printf("Warning: VACUUM failed: %s\n", vacErr)
-			} else {
-				fmt.Printf("[Store] SQLite VACUUM Complete: Empty freelist bytes fully reclaimed by OS.\n")
-			}
-		}
+		// We deliberately omit VACUUM here. SQLite will automatically reuse these empty pages
+		// for future inserts. Running VACUUM aggressively locks the database file exclusively,
+		// which immediately causes "database is locked" crashes in the main Bubbletea TUI loop.
 	}
+}
+
+// PruneAndCompact forces an immediate deletion of expired messages followed by a physical disk VACUUM.
+// Warning: This exclusively locks the database and should only be used by Headless/Automated routines!
+func (s *Store) PruneAndCompact(ctx context.Context, retention time.Duration) error {
+	s.pruneOldMessages(retention)
+	_, err := s.db.ExecContext(ctx, "VACUUM")
+	return err
 }
 
 func newID() string {
 	return strings.ReplaceAll(uuid.New().String(), "-", "")
 }
 
-func (s *Store) GetOrCreateUser(ctx context.Context, username string) (*User, error) {
+func (s *Store) GetOrCreateUser(ctx context.Context, username string, explicitID string) (*User, error) {
 	var u User
 	var createdAtStr string
 	err := s.db.QueryRowContext(ctx, `SELECT id, username, created_at FROM users WHERE username = ?`, username).Scan(&u.ID, &u.Username, &createdAtStr)
 	if err == nil {
+		// Verify and upgrade the legacy UUID to the deterministic Ed25519 PeerID
+		if u.ID != explicitID {
+			tx, err := s.db.BeginTx(ctx, nil)
+			if err == nil {
+				tx.ExecContext(ctx, `PRAGMA defer_foreign_keys = ON`)
+				tx.ExecContext(ctx, `UPDATE users SET id = ? WHERE id = ?`, explicitID, u.ID)
+				tx.ExecContext(ctx, `UPDATE messages SET author_id = ? WHERE author_id = ?`, explicitID, u.ID)
+				tx.ExecContext(ctx, `UPDATE memberships SET user_id = ? WHERE user_id = ?`, explicitID, u.ID)
+				tx.Commit()
+			}
+			u.ID = explicitID
+		}
 		t, _ := time.Parse(SortableTimeFormat, createdAtStr)
 		u.CreatedAt = t
 		return &u, nil
@@ -85,7 +101,7 @@ func (s *Store) GetOrCreateUser(ctx context.Context, username string) (*User, er
 	}
 
 	u = User{
-		ID:        newID(),
+		ID:        explicitID,
 		Username:  username,
 		CreatedAt: time.Now().UTC(),
 	}
@@ -108,12 +124,6 @@ func (s *Store) CreateRoom(ctx context.Context, name, description string, creato
 		description = string(descRunes[:256])
 	}
 
-	// Simple duplicate name check before creating a new ID
-	var exists int
-	if err := s.db.QueryRowContext(ctx, "SELECT 1 FROM rooms WHERE name = ?", name).Scan(&exists); err == nil {
-		return nil, fmt.Errorf("room '%s' already exists", name)
-	}
-
 	var id string
 	if isPrivate {
 		id = newID()
@@ -127,11 +137,17 @@ func (s *Store) CreateRoom(ctx context.Context, name, description string, creato
 		ID:          id,
 		Name:        name,
 		Description: description,
+		CreatorID:   creatorID,
 		IsPrivate:   isPrivate,
 		RoomKey:     roomKey,
 		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+		LastSeenAt:  time.Now().UTC(),
+		Version:     1,
 	}
 	createdAtStr := r.CreatedAt.Format(SortableTimeFormat)
+	updatedAtStr := r.UpdatedAt.Format(SortableTimeFormat)
+	lastSeenAtStr := r.LastSeenAt.Format(SortableTimeFormat)
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -139,7 +155,7 @@ func (s *Store) CreateRoom(ctx context.Context, name, description string, creato
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `INSERT INTO rooms (id, name, description, is_private, room_key, created_at) VALUES (?, ?, ?, ?, ?, ?)`, r.ID, r.Name, r.Description, r.IsPrivate, r.RoomKey, createdAtStr)
+	_, err = tx.ExecContext(ctx, `INSERT INTO rooms (id, name, description, creator_id, signature, is_private, room_key, created_at, updated_at, last_seen_at, version, announce_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, r.ID, r.Name, r.Description, r.CreatorID, r.Signature, r.IsPrivate, r.RoomKey, createdAtStr, updatedAtStr, lastSeenAtStr, r.Version, 1)
 	if err != nil {
 		return nil, err
 	}
@@ -153,12 +169,18 @@ func (s *Store) CreateRoom(ctx context.Context, name, description string, creato
 		return nil, err
 	}
 
+	if !isPrivate {
+		if err := s.UpsertPublicRoomIndex(ctx, r); err != nil {
+			return nil, err
+		}
+	}
+
 	return r, nil
 }
 
 // EnsurePublicRoomExists silently inserts a public room into the database if it doesn't already exist.
 // This is used by the P2P discovery listener when it hears about a room created by another peer.
-func (s *Store) EnsurePublicRoomExists(ctx context.Context, id, name, desc, creatorID string, createdAt time.Time) error {
+func (s *Store) EnsurePublicRoomExists(ctx context.Context, id, name, desc, creatorID, signature string, createdAt, updatedAt time.Time, version int) error {
 	// Truncate strings to prevent malicious room payloads from bloating the DB
 	nameRunes := []rune(name)
 	if len(nameRunes) > 64 {
@@ -169,13 +191,33 @@ func (s *Store) EnsurePublicRoomExists(ctx context.Context, id, name, desc, crea
 		desc = string(descRunes[:256])
 	}
 
-	createdAtStr := createdAt.Format(SortableTimeFormat)
+	lastSeenAtStr := time.Now().UTC().Format(SortableTimeFormat)
+	entry := &Room{
+		ID:            id,
+		Name:          name,
+		Description:   desc,
+		CreatorID:     creatorID,
+		Signature:     signature,
+		CreatedAt:     createdAt,
+		UpdatedAt:     updatedAt,
+		LastSeenAt:    time.Now().UTC(),
+		Version:       version,
+		AnnounceCount: 1,
+	}
+	if err := s.UpsertPublicRoomIndex(ctx, entry); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT OR IGNORE INTO rooms (id, name, description, is_private, created_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, id, name, desc, false, createdAtStr)
-
-	// Note: We don't automatically join the room (no membership) so it doesn't appear in the "pinned" list.
+		UPDATE rooms
+		SET name = CASE WHEN name LIKE 'Remote Room%' THEN ? ELSE name END,
+		    description = CASE WHEN description = 'External Room' OR description = '' THEN ? ELSE description END,
+		    creator_id = COALESCE(creator_id, ?),
+		    signature = COALESCE(signature, ?),
+		    updated_at = CASE WHEN COALESCE(version, 1) <= ? THEN ? ELSE updated_at END,
+		    version = CASE WHEN COALESCE(version, 1) <= ? THEN ? ELSE version END,
+		    last_seen_at = ?
+		WHERE id = ? AND is_private = 0
+	`, name, desc, creatorID, signature, version, updatedAt.Format(SortableTimeFormat), version, version, lastSeenAtStr, id)
 	return err
 }
 
@@ -189,12 +231,22 @@ func (s *Store) JoinExternalRoom(ctx context.Context, roomID, name, userID strin
 		// fetch the fully initialized room to return
 		var r Room
 		var createdAtStr string
+		var updatedAtStr sql.NullString
+		var creatorID sql.NullString
+		var signature sql.NullString
 		var isPrivateLocal sql.NullBool
 		var roomKeyLocal sql.NullString
-		err := s.db.QueryRowContext(ctx, "SELECT id, name, description, is_private, room_key, created_at FROM rooms WHERE id = ?", roomID).Scan(
-			&r.ID, &r.Name, &r.Description, &isPrivateLocal, &roomKeyLocal, &createdAtStr)
+		var lastSeenAtStr sql.NullString
+		err := s.db.QueryRowContext(ctx, "SELECT id, name, description, creator_id, signature, is_private, room_key, created_at, updated_at, last_seen_at, version, announce_count FROM rooms WHERE id = ?", roomID).Scan(
+			&r.ID, &r.Name, &r.Description, &creatorID, &signature, &isPrivateLocal, &roomKeyLocal, &createdAtStr, &updatedAtStr, &lastSeenAtStr, &r.Version, &r.AnnounceCount)
 		if err != nil {
 			return nil, err
+		}
+		if creatorID.Valid {
+			r.CreatorID = creatorID.String
+		}
+		if signature.Valid {
+			r.Signature = signature.String
 		}
 		if isPrivateLocal.Valid {
 			r.IsPrivate = isPrivateLocal.Bool
@@ -203,6 +255,12 @@ func (s *Store) JoinExternalRoom(ctx context.Context, roomID, name, userID strin
 			r.RoomKey = roomKeyLocal.String
 		}
 		r.CreatedAt, _ = time.Parse(SortableTimeFormat, createdAtStr)
+		if updatedAtStr.Valid {
+			r.UpdatedAt, _ = time.Parse(SortableTimeFormat, updatedAtStr.String)
+		}
+		if lastSeenAtStr.Valid {
+			r.LastSeenAt, _ = time.Parse(SortableTimeFormat, lastSeenAtStr.String)
+		}
 		return &r, nil
 	}
 
@@ -211,11 +269,17 @@ func (s *Store) JoinExternalRoom(ctx context.Context, roomID, name, userID strin
 		ID:          roomID,
 		Name:        name,
 		Description: "External Room",
+		CreatorID:   userID,
 		IsPrivate:   isPrivate,
 		RoomKey:     roomKey,
 		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+		LastSeenAt:  time.Now().UTC(),
+		Version:     1,
 	}
 	createdAtStr := r.CreatedAt.Format(SortableTimeFormat)
+	updatedAtStr := r.UpdatedAt.Format(SortableTimeFormat)
+	lastSeenAtStr := r.LastSeenAt.Format(SortableTimeFormat)
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -223,7 +287,7 @@ func (s *Store) JoinExternalRoom(ctx context.Context, roomID, name, userID strin
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `INSERT INTO rooms (id, name, description, is_private, room_key, created_at) VALUES (?, ?, ?, ?, ?, ?)`, r.ID, r.Name, r.Description, r.IsPrivate, r.RoomKey, createdAtStr)
+	_, err = tx.ExecContext(ctx, `INSERT INTO rooms (id, name, description, creator_id, signature, is_private, room_key, created_at, updated_at, last_seen_at, version, announce_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, r.ID, r.Name, r.Description, r.CreatorID, r.Signature, r.IsPrivate, r.RoomKey, createdAtStr, updatedAtStr, lastSeenAtStr, r.Version, 1)
 	if err != nil {
 		return nil, err
 	}
@@ -237,6 +301,12 @@ func (s *Store) JoinExternalRoom(ctx context.Context, roomID, name, userID strin
 		return nil, err
 	}
 
+	if !isPrivate {
+		if err := s.UpsertPublicRoomIndex(ctx, r); err != nil {
+			return nil, err
+		}
+	}
+
 	return r, nil
 }
 
@@ -244,16 +314,102 @@ func (s *Store) UpdateRoomNameIfDefault(ctx context.Context, roomID, newName str
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE rooms 
 		SET name = ? 
-		WHERE id = ? AND name = 'Remote Room'
+		WHERE id = ? AND name LIKE 'Remote Room%'
+	`, newName, roomID)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE public_room_index
+		SET name = ?
+		WHERE room_id = ?
 	`, newName, roomID)
 	return err
+}
+
+func (s *Store) UpdateRoomSecret(ctx context.Context, roomID, roomKey string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE rooms
+		SET room_key = ?
+		WHERE id = ?
+	`, roomKey, roomID)
+	return err
+}
+
+func (s *Store) UpdatePublicRoomMetadata(ctx context.Context, roomID, ownerID, name, description, signature string) (*Room, error) {
+	nameRunes := []rune(name)
+	if len(nameRunes) > 64 {
+		name = string(nameRunes[:64])
+	}
+	descRunes := []rune(description)
+	if len(descRunes) > 256 {
+		description = string(descRunes[:256])
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var role string
+	var r Room
+	var createdAtStr string
+	var updatedAtStr sql.NullString
+	var lastSeenAtStr sql.NullString
+	err = tx.QueryRowContext(ctx, `
+		SELECT m.role, r.id, r.name, r.description, r.creator_id, r.signature, r.created_at, r.updated_at, r.last_seen_at, r.version, r.announce_count
+		FROM rooms r
+		JOIN memberships m ON m.room_id = r.id
+		WHERE r.id = ? AND m.user_id = ? AND r.is_private = 0
+	`, roomID, ownerID).Scan(&role, &r.ID, &r.Name, &r.Description, &r.CreatorID, &r.Signature, &createdAtStr, &updatedAtStr, &lastSeenAtStr, &r.Version, &r.AnnounceCount)
+	if err != nil {
+		return nil, err
+	}
+	if role != "owner" {
+		return nil, fmt.Errorf("user %s is not the owner of room %s", ownerID, roomID)
+	}
+
+	r.CreatedAt, _ = time.Parse(SortableTimeFormat, createdAtStr)
+	if updatedAtStr.Valid {
+		r.UpdatedAt, _ = time.Parse(SortableTimeFormat, updatedAtStr.String)
+	}
+	if lastSeenAtStr.Valid {
+		r.LastSeenAt, _ = time.Parse(SortableTimeFormat, lastSeenAtStr.String)
+	}
+
+	r.Name = name
+	r.Description = description
+	r.Signature = signature
+	r.Version++
+	r.UpdatedAt = time.Now().UTC()
+	if r.LastSeenAt.IsZero() {
+		r.LastSeenAt = r.UpdatedAt
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		UPDATE rooms
+		SET name = ?, description = ?, signature = ?, updated_at = ?, version = ?
+		WHERE id = ?
+	`, r.Name, r.Description, r.Signature, r.UpdatedAt.Format(SortableTimeFormat), r.Version, roomID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	if err := s.UpsertPublicRoomIndex(ctx, &r); err != nil {
+		return nil, err
+	}
+	return &r, nil
 }
 
 func (s *Store) ListRooms(ctx context.Context, userID string) ([]Room, error) {
 	// We use a subquery to find the newest message in the room
 	// and compare it against the user's last_read_at for that room.
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT r.id, r.name, r.description, r.is_private, r.room_key, r.created_at,
+		SELECT r.id, r.name, r.description, r.creator_id, r.signature, r.is_private, r.room_key, r.created_at, r.updated_at, r.last_seen_at, r.version,
 		       (SELECT COUNT(m2.id) > 0 
 		        FROM messages m2 
 		        WHERE m2.room_id = r.id 
@@ -273,11 +429,21 @@ func (s *Store) ListRooms(ctx context.Context, userID string) ([]Room, error) {
 	for rows.Next() {
 		var r Room
 		var createdAtStr string
+		var updatedAtStr sql.NullString
+		var creatorID sql.NullString
+		var signature sql.NullString
+		var lastSeenAtStr sql.NullString
 		var isPrivateLocal sql.NullBool
 		var roomKeyLocal sql.NullString
 
-		if err := rows.Scan(&r.ID, &r.Name, &r.Description, &isPrivateLocal, &roomKeyLocal, &createdAtStr, &r.HasUnread); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Description, &creatorID, &signature, &isPrivateLocal, &roomKeyLocal, &createdAtStr, &updatedAtStr, &lastSeenAtStr, &r.Version, &r.HasUnread); err != nil {
 			return nil, err
+		}
+		if creatorID.Valid {
+			r.CreatorID = creatorID.String
+		}
+		if signature.Valid {
+			r.Signature = signature.String
 		}
 
 		if isPrivateLocal.Valid {
@@ -288,6 +454,12 @@ func (s *Store) ListRooms(ctx context.Context, userID string) ([]Room, error) {
 		}
 
 		r.CreatedAt, _ = time.Parse(SortableTimeFormat, createdAtStr)
+		if updatedAtStr.Valid {
+			r.UpdatedAt, _ = time.Parse(SortableTimeFormat, updatedAtStr.String)
+		}
+		if lastSeenAtStr.Valid {
+			r.LastSeenAt, _ = time.Parse(SortableTimeFormat, lastSeenAtStr.String)
+		}
 		rooms = append(rooms, r)
 	}
 	return rooms, rows.Err()
@@ -295,11 +467,11 @@ func (s *Store) ListRooms(ctx context.Context, userID string) ([]Room, error) {
 
 func (s *Store) SearchAllRooms(ctx context.Context) ([]Room, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, description, is_private, created_at
-		FROM rooms
-		WHERE is_private = false
-		ORDER BY name ASC, created_at DESC
-	`)
+		SELECT room_id, name, description, creator_id, signature, created_at, updated_at, last_seen_at, version, announce_count
+		FROM public_room_index
+		WHERE COALESCE(last_seen_at, created_at) >= ?
+		ORDER BY COALESCE(last_seen_at, created_at) DESC, name ASC
+	`, time.Now().UTC().Add(-publicRoomFreshnessTTL).Format(SortableTimeFormat))
 	if err != nil {
 		return nil, err
 	}
@@ -308,18 +480,169 @@ func (s *Store) SearchAllRooms(ctx context.Context) ([]Room, error) {
 	for rows.Next() {
 		var r Room
 		var createdAtStr string
-		var isPrivateLocal sql.NullBool
-
-		if err := rows.Scan(&r.ID, &r.Name, &r.Description, &isPrivateLocal, &createdAtStr); err != nil {
+		var updatedAtStr sql.NullString
+		var creatorID sql.NullString
+		var signature sql.NullString
+		var lastSeenAtStr sql.NullString
+		if err := rows.Scan(&r.ID, &r.Name, &r.Description, &creatorID, &signature, &createdAtStr, &updatedAtStr, &lastSeenAtStr, &r.Version, &r.AnnounceCount); err != nil {
 			return nil, err
 		}
-		if isPrivateLocal.Valid {
-			r.IsPrivate = isPrivateLocal.Bool
+		if creatorID.Valid {
+			r.CreatorID = creatorID.String
 		}
+		if signature.Valid {
+			r.Signature = signature.String
+		}
+		r.IsPrivate = false
 		r.CreatedAt, _ = time.Parse(SortableTimeFormat, createdAtStr)
+		if updatedAtStr.Valid {
+			r.UpdatedAt, _ = time.Parse(SortableTimeFormat, updatedAtStr.String)
+		}
+		if lastSeenAtStr.Valid {
+			r.LastSeenAt, _ = time.Parse(SortableTimeFormat, lastSeenAtStr.String)
+		}
 		rooms = append(rooms, r)
 	}
 	return rooms, rows.Err()
+}
+
+func (s *Store) GetRoom(ctx context.Context, roomID string) (*Room, error) {
+	var r Room
+	var createdAtStr string
+	var updatedAtStr sql.NullString
+	var lastSeenAtStr sql.NullString
+	var creatorID sql.NullString
+	var signature sql.NullString
+	var isPrivate sql.NullBool
+	var roomKey sql.NullString
+
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, name, description, creator_id, signature, is_private, room_key, created_at, updated_at, last_seen_at, version, announce_count
+		FROM rooms
+		WHERE id = ?
+	`, roomID).Scan(
+		&r.ID, &r.Name, &r.Description, &creatorID, &signature, &isPrivate, &roomKey, &createdAtStr, &updatedAtStr, &lastSeenAtStr, &r.Version, &r.AnnounceCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if creatorID.Valid {
+		r.CreatorID = creatorID.String
+	}
+	if signature.Valid {
+		r.Signature = signature.String
+	}
+	if isPrivate.Valid {
+		r.IsPrivate = isPrivate.Bool
+	}
+	if roomKey.Valid {
+		r.RoomKey = roomKey.String
+	}
+	r.CreatedAt, _ = time.Parse(SortableTimeFormat, createdAtStr)
+	if updatedAtStr.Valid {
+		r.UpdatedAt, _ = time.Parse(SortableTimeFormat, updatedAtStr.String)
+	}
+	if lastSeenAtStr.Valid {
+		r.LastSeenAt, _ = time.Parse(SortableTimeFormat, lastSeenAtStr.String)
+	}
+	return &r, nil
+}
+
+func (s *Store) ListJoinedPublicRooms(ctx context.Context, userID string) ([]Room, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT r.id, r.name, r.description, r.creator_id, r.signature, r.created_at, r.updated_at, r.last_seen_at, r.version, COALESCE(r.announce_count, 0)
+		FROM rooms r
+		JOIN memberships m ON m.room_id = r.id
+		WHERE m.user_id = ? AND r.is_private = 0
+		ORDER BY COALESCE(r.last_seen_at, r.created_at) DESC, r.name ASC
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rooms []Room
+	for rows.Next() {
+		var r Room
+		var createdAtStr string
+		var updatedAtStr sql.NullString
+		var creatorID sql.NullString
+		var signature sql.NullString
+		var lastSeenAtStr sql.NullString
+		if err := rows.Scan(&r.ID, &r.Name, &r.Description, &creatorID, &signature, &createdAtStr, &updatedAtStr, &lastSeenAtStr, &r.Version, &r.AnnounceCount); err != nil {
+			return nil, err
+		}
+		if creatorID.Valid {
+			r.CreatorID = creatorID.String
+		}
+		if signature.Valid {
+			r.Signature = signature.String
+		}
+		r.CreatedAt, _ = time.Parse(SortableTimeFormat, createdAtStr)
+		if updatedAtStr.Valid {
+			r.UpdatedAt, _ = time.Parse(SortableTimeFormat, updatedAtStr.String)
+		}
+		if lastSeenAtStr.Valid {
+			r.LastSeenAt, _ = time.Parse(SortableTimeFormat, lastSeenAtStr.String)
+		}
+		rooms = append(rooms, r)
+	}
+	return rooms, rows.Err()
+}
+
+func (s *Store) PruneStalePublicRooms(ctx context.Context, retention time.Duration) error {
+	cutoff := time.Now().UTC().Add(-retention).Format(SortableTimeFormat)
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM public_room_index
+		WHERE COALESCE(last_seen_at, created_at) < ?
+		  AND room_id NOT IN (
+			SELECT room_id FROM memberships
+			INNER JOIN rooms ON rooms.id = memberships.room_id
+			WHERE rooms.is_private = 0
+		  )
+	`, cutoff)
+	return err
+}
+
+func (s *Store) UpsertPublicRoomIndex(ctx context.Context, room *Room) error {
+	if room == nil || room.IsPrivate {
+		return nil
+	}
+	createdAtStr := room.CreatedAt.Format(SortableTimeFormat)
+	updatedAt := room.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = room.CreatedAt
+	}
+	updatedAtStr := updatedAt.Format(SortableTimeFormat)
+	lastSeenAt := room.LastSeenAt
+	if lastSeenAt.IsZero() {
+		lastSeenAt = time.Now().UTC()
+	}
+	lastSeenAtStr := lastSeenAt.Format(SortableTimeFormat)
+	version := room.Version
+	if version <= 0 {
+		version = 1
+	}
+	announceCount := room.AnnounceCount
+	if announceCount <= 0 {
+		announceCount = 1
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO public_room_index (room_id, name, description, creator_id, signature, created_at, updated_at, last_seen_at, version, announce_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(room_id) DO UPDATE SET
+			name = CASE WHEN excluded.version >= public_room_index.version THEN excluded.name ELSE public_room_index.name END,
+			description = CASE WHEN excluded.version >= public_room_index.version THEN excluded.description ELSE public_room_index.description END,
+			creator_id = COALESCE(excluded.creator_id, public_room_index.creator_id),
+			signature = CASE WHEN excluded.version >= public_room_index.version THEN COALESCE(excluded.signature, public_room_index.signature) ELSE public_room_index.signature END,
+			created_at = CASE WHEN excluded.version >= public_room_index.version THEN excluded.created_at ELSE public_room_index.created_at END,
+			updated_at = CASE WHEN excluded.version >= public_room_index.version THEN excluded.updated_at ELSE public_room_index.updated_at END,
+			last_seen_at = excluded.last_seen_at,
+			version = MAX(public_room_index.version, excluded.version),
+			announce_count = public_room_index.announce_count + 1
+	`, room.ID, room.Name, room.Description, room.CreatorID, room.Signature, createdAtStr, updatedAtStr, lastSeenAtStr, version, announceCount)
+	return err
 }
 
 func (s *Store) JoinRoom(ctx context.Context, userID, roomID string) error {
@@ -354,6 +677,9 @@ func (s *Store) DeleteRoom(ctx context.Context, roomID string) error {
 	}
 	// Delete the room itself
 	if _, err := tx.ExecContext(ctx, `DELETE FROM rooms WHERE id = ?`, roomID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM public_room_index WHERE room_id = ?`, roomID); err != nil {
 		return err
 	}
 

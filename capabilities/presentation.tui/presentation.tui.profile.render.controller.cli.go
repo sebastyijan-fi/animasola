@@ -22,8 +22,9 @@ type ProfileModel struct {
 	profiles []string
 	index    int
 
-	creatingNew bool
-	nameInput   textinput.Model
+	creatingNew      bool
+	confirmingDelete bool
+	nameInput        textinput.Model
 }
 
 func NewProfileModel() *ProfileModel {
@@ -42,11 +43,11 @@ func NewProfileModel() *ProfileModel {
 }
 
 func (m *ProfileModel) loadProfiles() {
-	homeDir, err := os.UserHomeDir()
+	configRoot, err := os.UserConfigDir()
 	if err != nil {
 		return
 	}
-	configDir := filepath.Join(homeDir, ".config", "animasola")
+	configDir := filepath.Join(configRoot, "animasola")
 	entries, err := os.ReadDir(configDir)
 	if err != nil {
 		return
@@ -92,6 +93,7 @@ func (m *ProfileModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// basic sanitization to prevent path injection
 				name = strings.ReplaceAll(name, "/", "")
 				name = strings.ReplaceAll(name, "\\", "")
+				name = strings.ReplaceAll(name, ".", "")
 				if name != "" {
 					return m, func() tea.Msg { return ProfileSelectedMsg{Username: name} }
 				}
@@ -101,6 +103,22 @@ func (m *ProfileModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				var cmd tea.Cmd
 				m.nameInput, cmd = m.nameInput.Update(msg)
 				cmds = append(cmds, cmd)
+			}
+		} else if m.confirmingDelete {
+			switch msg.String() {
+			case "y", "Y":
+				if len(m.profiles) > 0 && m.index < len(m.profiles) {
+					configRoot, err := os.UserConfigDir()
+					if err == nil {
+						targetProfile := filepath.Join(configRoot, "animasola", m.profiles[m.index])
+						_ = os.RemoveAll(targetProfile)
+					}
+					m.index = 0
+					m.confirmingDelete = false
+					m.loadProfiles()
+				}
+			case "n", "N", "esc":
+				m.confirmingDelete = false
 			}
 		} else {
 			switch msg.String() {
@@ -116,6 +134,10 @@ func (m *ProfileModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.creatingNew = true
 				m.nameInput.Focus()
 				cmds = append(cmds, textinput.Blink)
+			case "x":
+				if len(m.profiles) > 0 {
+					m.confirmingDelete = true
+				}
 			case "enter":
 				if len(m.profiles) > 0 && m.index < len(m.profiles) {
 					return m, func() tea.Msg { return ProfileSelectedMsg{Username: m.profiles[m.index]} }
@@ -143,6 +165,17 @@ func (m *ProfileModel) View() string {
 		s.WriteString("Create New Profile:\n\n")
 		s.WriteString(m.nameInput.View() + "\n\n")
 		s.WriteString(styleNormal.Render("(enter to submit, esc to cancel)"))
+	} else if m.confirmingDelete {
+		for i, p := range m.profiles {
+			if i == m.index {
+				s.WriteString(fmt.Sprintf("> %s\n", styleSelected.Render(p)))
+			} else {
+				s.WriteString(fmt.Sprintf("  %s\n", styleNormal.Render(p)))
+			}
+		}
+		s.WriteString("\n")
+		warningStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
+		s.WriteString(warningStyle.Render(fmt.Sprintf("Delete profile '%s'?\nAll keys and history will be permanently lost. (y/n)", m.profiles[m.index])))
 	} else {
 		for i, p := range m.profiles {
 			cursor := " "
@@ -154,7 +187,7 @@ func (m *ProfileModel) View() string {
 			s.WriteString(fmt.Sprintf("%s %s\n", cursor, style.Render(p)))
 		}
 		s.WriteString("\n")
-		s.WriteString(styleNormal.Render("up/down: navigate • enter: select • c: new identity • q: quit"))
+		s.WriteString(styleNormal.Render("up/down: navigate • enter: select • c: new identity • x: delete • q: quit"))
 	}
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, s.String())

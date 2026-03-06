@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 	"time"
 
@@ -11,18 +12,30 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	discovery "github.com/sebastyijan/animasola/capabilities/network.discovery"
 	p2p "github.com/sebastyijan/animasola/capabilities/network.p2p"
 	sqlite "github.com/sebastyijan/animasola/capabilities/storage.sqlite"
 )
 
 type OpenRoomMsg struct {
-	RoomID    string
-	RoomName  string
-	IsPrivate bool
-	RoomKey   string
+	RoomID     string
+	RoomName   string
+	IsPrivate  bool
+	RoomKey    string
+	RequireDHT bool
 }
 
 type RoomsLoadedMsg []sqlite.Room
+
+type RoomCreatedNeedsSyncMsg struct{ Room *sqlite.Room }
+
+type RoomJoinNeedsSyncMsg struct {
+	RoomID     string
+	RoomName   string
+	IsPrivate  bool
+	RoomKey    string
+	RequireDHT bool
+}
 
 // RoomDiscoveredMsg is sent when the background P2P node discovers a new public room
 type RoomDiscoveredMsg struct {
@@ -42,6 +55,7 @@ type HomeModel struct {
 	sqlite *sqlite.Store
 	user   *sqlite.User
 	node   *p2p.Node
+	disco  *discovery.Service
 
 	width  int
 	height int
@@ -53,6 +67,8 @@ type HomeModel struct {
 
 	creatingRoom      bool
 	joiningRoom       bool
+	syncingRoom       bool
+	resolvingRoom     bool
 	showingInfo       bool // Whether the Room Info Modal is open
 	copiedToast       bool // True if the room ID was just copied
 	processing        bool
@@ -66,7 +82,7 @@ type HomeModel struct {
 	updateVersion     string
 }
 
-func NewHomeModel(s *sqlite.Store, u *sqlite.User, n *p2p.Node) *HomeModel {
+func NewHomeModel(s *sqlite.Store, u *sqlite.User, n *p2p.Node, d *discovery.Service) *HomeModel {
 	ti := textinput.New()
 	ti.Placeholder = "New room name..."
 	ti.CharLimit = 32
@@ -95,6 +111,7 @@ func NewHomeModel(s *sqlite.Store, u *sqlite.User, n *p2p.Node) *HomeModel {
 		sqlite:            s,
 		user:              u,
 		node:              n,
+		disco:             d,
 		mode:              "pinned",
 		roomNameInput:     ti,
 		roomPasswordInput: pi,
@@ -113,6 +130,10 @@ func (m *HomeModel) SetNode(n *p2p.Node) {
 	m.node = n
 }
 
+func (m *HomeModel) SetDiscovery(d *discovery.Service) {
+	m.disco = d
+}
+
 func (m *HomeModel) Init() tea.Cmd {
 	m.processing = false
 	m.err = nil
@@ -125,6 +146,13 @@ func (m *HomeModel) FetchRooms() tea.Cmd {
 		var err error
 
 		if m.mode == "search" {
+			if m.disco != nil {
+				go func() {
+					reqCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					_ = m.disco.RequestSnapshot(reqCtx)
+				}()
+			}
 			// Search fetches all public rooms and we filter locally
 			rooms, err = m.sqlite.SearchAllRooms(context.Background())
 		} else {
@@ -154,6 +182,8 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case error:
 		m.err = msg
 		m.processing = false
+		m.syncingRoom = false
+		m.resolvingRoom = false
 		return m, nil
 
 	case RoomsLoadedMsg:
@@ -178,30 +208,50 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case RoomDiscoveredMsg:
-		// ALWAYS insert the room into allPublicRooms to keep state fresh, regardless of mode
-		inserted := false
-		for i, r := range m.allPublicRooms {
-			if msg.Room.Name < r.Name {
-				m.allPublicRooms = append(m.allPublicRooms[:i], append([]sqlite.Room{msg.Room}, m.allPublicRooms[i:]...)...)
-				inserted = true
+		// ALWAYS update allPublicRooms to keep state fresh, regardless of mode
+		isDup := false
+		for _, r := range m.allPublicRooms {
+			if r.ID == msg.Room.ID {
+				isDup = true
 				break
 			}
 		}
-		if !inserted {
-			m.allPublicRooms = append(m.allPublicRooms, msg.Room)
-		}
 
-		if m.mode == "search" {
-			// Re-apply filter immediately so it pops up visually for the user
-			query := strings.ToLower(strings.TrimSpace(m.searchInput.Value()))
-			var filtered []sqlite.Room
-			for _, r := range m.allPublicRooms {
-				if query == "" || strings.Contains(strings.ToLower(r.Name), query) {
-					filtered = append(filtered, r)
+		if !isDup {
+			inserted := false
+			for i, r := range m.allPublicRooms {
+				if msg.Room.Name < r.Name {
+					m.allPublicRooms = append(m.allPublicRooms[:i], append([]sqlite.Room{msg.Room}, m.allPublicRooms[i:]...)...)
+					inserted = true
+					break
 				}
 			}
-			m.rooms = filtered
+			if !inserted {
+				m.allPublicRooms = append(m.allPublicRooms, msg.Room)
+			}
+
+			if m.mode == "search" {
+				// Re-apply filter immediately so it pops up visually for the user
+				query := strings.ToLower(strings.TrimSpace(m.searchInput.Value()))
+				var filtered []sqlite.Room
+				for _, r := range m.allPublicRooms {
+					if query == "" || strings.Contains(strings.ToLower(r.Name), query) {
+						filtered = append(filtered, r)
+					}
+				}
+				m.rooms = filtered
+			}
 		}
+
+	case RoomCreatedNeedsSyncMsg:
+		m.processing = false
+		m.syncingRoom = true
+		return m, m.syncRoomDiscovery(msg.Room)
+
+	case RoomJoinNeedsSyncMsg:
+		m.processing = false
+		m.resolvingRoom = true
+		return m, m.syncRoomJoin(msg)
 
 	case tea.KeyMsg:
 		if m.confirmingDelete {
@@ -239,6 +289,20 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showingInfo = false
 			}
 			return m, tea.Batch(cmds...)
+		} else if m.syncingRoom {
+			// CRITICAL: We intentionally block all input while the network is syncing!
+			// We only accept 'esc' to cancel the sync and return to the main menu.
+			if msg.String() == "esc" {
+				m.syncingRoom = false
+				return m, m.FetchRooms()
+			}
+			return m, nil
+		} else if m.resolvingRoom {
+			if msg.String() == "esc" {
+				m.resolvingRoom = false
+				return m, m.FetchRooms()
+			}
+			return m, nil
 		} else if m.creatingRoom {
 			switch msg.String() {
 			case "esc":
@@ -333,10 +397,11 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					_ = m.sqlite.MarkRoomAsRead(context.Background(), m.user.ID, r.ID)
 					return m, func() tea.Msg {
 						return OpenRoomMsg{
-							RoomID:    r.ID,
-							RoomName:  r.Name,
-							IsPrivate: r.IsPrivate,
-							RoomKey:   r.RoomKey,
+							RoomID:     r.ID,
+							RoomName:   r.Name,
+							IsPrivate:  r.IsPrivate,
+							RoomKey:    r.RoomKey,
+							RequireDHT: false,
 						}
 					}
 				} else {
@@ -388,10 +453,11 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						_ = m.sqlite.MarkRoomAsRead(context.Background(), m.user.ID, m.rooms[m.index].ID)
 
 						return OpenRoomMsg{
-							RoomID:    m.rooms[m.index].ID,
-							RoomName:  m.rooms[m.index].Name,
-							IsPrivate: m.rooms[m.index].IsPrivate,
-							RoomKey:   m.rooms[m.index].RoomKey,
+							RoomID:     m.rooms[m.index].ID,
+							RoomName:   m.rooms[m.index].Name,
+							IsPrivate:  m.rooms[m.index].IsPrivate,
+							RoomKey:    m.rooms[m.index].RoomKey,
+							RequireDHT: false, // Already locally pinned and known
 						}
 					}
 				}
@@ -456,20 +522,71 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *HomeModel) createRoom(name, password string) tea.Cmd {
 	return func() tea.Msg {
 		isPrivate := password != ""
-		r, err := m.sqlite.CreateRoom(context.Background(), name, "", m.user.ID, isPrivate, password)
+		startTime := time.Now()
+		r, err := m.sqlite.CreateRoom(context.Background(), name, "", m.user.ID, isPrivate, "")
 		if err != nil {
 			return err
 		}
+		if isPrivate {
+			r.RoomKey = sqlite.EncodePrivateRoomKey(r.ID, password)
+			if err := m.sqlite.UpdateRoomSecret(context.Background(), r.ID, r.RoomKey); err != nil {
+				return err
+			}
+		}
+		duration := int(time.Since(startTime).Milliseconds())
 
-		if !isPrivate && m.node != nil {
-			_ = m.node.BroadcastRoomDiscovery(context.Background(), r)
+		if m.node != nil && m.node.Telemetry != nil && isPrivate {
+			m.node.Telemetry.RecordEvent(context.Background(), "Argon2id_Derivation_Latency", duration, map[string]string{
+				"action": "room_create",
+			}, runtime.GOOS, runtime.GOARCH)
+		}
+
+		if !isPrivate && m.disco != nil {
+			go m.disco.BroadcastRoom(context.Background(), r)
 		}
 
 		return OpenRoomMsg{
-			RoomID:    r.ID,
-			RoomName:  r.Name,
-			IsPrivate: isPrivate,
-			RoomKey:   r.RoomKey,
+			RoomID:     r.ID,
+			RoomName:   r.Name,
+			IsPrivate:  isPrivate,
+			RoomKey:    r.RoomKey,
+			RequireDHT: false, // DO NOT timeout the creator just because they have 0 peers!
+		}
+	}
+}
+
+func (m *HomeModel) syncRoomDiscovery(r *sqlite.Room) tea.Cmd {
+	return func() tea.Msg {
+		if m.disco != nil {
+			_ = m.disco.PublishRoomSync(context.Background(), r)
+		}
+
+		// Wait loop succeeded (or timed out after 5m), physically open the room now!
+		return OpenRoomMsg{
+			RoomID:     r.ID,
+			RoomName:   r.Name,
+			IsPrivate:  false,
+			RoomKey:    r.RoomKey,
+			RequireDHT: false, // DO NOT timeout the creator just because they have 0 peers!
+		}
+	}
+}
+
+func (m *HomeModel) syncRoomJoin(msg RoomJoinNeedsSyncMsg) tea.Cmd {
+	return func() tea.Msg {
+		if msg.RequireDHT && !msg.IsPrivate && m.node != nil {
+			err := m.node.WaitForRoomPeers(context.Background(), msg.RoomID, 4*time.Minute)
+			if err != nil {
+				return err // Will be caught by 'case error:' in HomeModel
+			}
+		}
+
+		return OpenRoomMsg{
+			RoomID:     msg.RoomID,
+			RoomName:   msg.RoomName,
+			IsPrivate:  msg.IsPrivate,
+			RoomKey:    msg.RoomKey,
+			RequireDHT: false, // We already resolved the network natively!
 		}
 	}
 }
@@ -477,15 +594,29 @@ func (m *HomeModel) createRoom(name, password string) tea.Cmd {
 func (m *HomeModel) joinRoomByID(id, password string) tea.Cmd {
 	return func() tea.Msg {
 		isPrivate := password != ""
-		r, err := m.sqlite.JoinExternalRoom(context.Background(), id, "Remote Room", m.user.ID, isPrivate, password)
+		startTime := time.Now()
+		storedRoomKey := password
+		if isPrivate {
+			storedRoomKey = sqlite.EncodePrivateRoomKey(id, password)
+		}
+		r, err := m.sqlite.JoinExternalRoom(context.Background(), id, "Remote Room", m.user.ID, isPrivate, storedRoomKey)
 		if err != nil {
 			return err
 		}
+		duration := int(time.Since(startTime).Milliseconds())
+
+		if m.node != nil && m.node.Telemetry != nil && isPrivate {
+			m.node.Telemetry.RecordEvent(context.Background(), "Argon2id_Derivation_Latency", duration, map[string]string{
+				"action": "room_join",
+			}, runtime.GOOS, runtime.GOARCH)
+		}
+
 		return OpenRoomMsg{
-			RoomID:    r.ID,
-			RoomName:  r.Name,
-			IsPrivate: isPrivate,
-			RoomKey:   password,
+			RoomID:     r.ID,
+			RoomName:   r.Name,
+			IsPrivate:  isPrivate,
+			RoomKey:    password,
+			RequireDHT: false,
 		}
 	}
 }
@@ -500,10 +631,11 @@ func (m *HomeModel) joinRoomByName(name string) tea.Cmd {
 				_ = m.sqlite.JoinRoom(context.Background(), m.user.ID, r.ID)
 				_ = m.sqlite.MarkRoomAsRead(context.Background(), m.user.ID, r.ID)
 				return OpenRoomMsg{
-					RoomID:    r.ID,
-					RoomName:  r.Name,
-					IsPrivate: r.IsPrivate,
-					RoomKey:   r.RoomKey,
+					RoomID:     r.ID,
+					RoomName:   r.Name,
+					IsPrivate:  r.IsPrivate,
+					RoomKey:    r.RoomKey,
+					RequireDHT: false,
 				}
 			}
 		}
@@ -548,7 +680,7 @@ func (m *HomeModel) View() string {
 		if m.mode == "pinned" {
 			s.WriteString("You haven't joined any rooms. Press 's' to search or 'c' to create.\n")
 		} else {
-			s.WriteString("No public rooms found matching your search. Press enter to force-create it.\n")
+			s.WriteString("No public rooms found matching your search. Press enter to attempt direct connection.\n")
 		}
 	} else {
 		for i, r := range m.rooms {
@@ -587,6 +719,18 @@ func (m *HomeModel) View() string {
 			}
 			s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(fmt.Sprintf("Are you sure you want to %s '%s'? (y/N)", action, r.Name)))
 		}
+	} else if m.syncingRoom {
+		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render("Publishing to Global Network..."))
+		s.WriteString("\n")
+		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("(Tor Kademlia routing may take 1 to 3 minutes to settle)"))
+		s.WriteString("\n\n")
+		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("esc: Give Up (Room will be saved locally)"))
+	} else if m.resolvingRoom {
+		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render("Resolving Room on Global Tor Network..."))
+		s.WriteString("\n")
+		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("(Tor Kademlia DHT traversal may take 1 to 3 minutes)"))
+		s.WriteString("\n\n")
+		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("esc: Cancel Join"))
 	} else if m.creatingRoom {
 		s.WriteString("Create Room:\n")
 		s.WriteString("  Name:     " + m.roomNameInput.View() + "\n")

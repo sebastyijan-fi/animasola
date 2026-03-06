@@ -10,18 +10,22 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	version "github.com/sebastyijan/animasola/capabilities/core.version"
 	keys "github.com/sebastyijan/animasola/capabilities/identity.keys"
+	telemetry "github.com/sebastyijan/animasola/capabilities/network.telemetry"
 	tor "github.com/sebastyijan/animasola/capabilities/network.tor"
 	sqlite "github.com/sebastyijan/animasola/capabilities/storage.sqlite"
 )
 
 type AppBootstrappedMsg struct {
-	Store      *sqlite.Store
-	User       *sqlite.User
-	Keys       *keys.Keys
-	TorConfig  *tor.Config
-	TorRunner  *tor.Runner
-	ProgressCh <-chan string
+	Store        *sqlite.Store
+	User         *sqlite.User
+	Keys         *keys.Keys
+	TorConfig    *tor.Config
+	TorRunner    *tor.Runner
+	ProgressCh   <-chan string
+	TorStartTime time.Time
+	Version      string
 }
 
 type BootstrapErrMsg struct {
@@ -52,8 +56,8 @@ func NewRootModel(ctx context.Context) *RootModel {
 	}
 
 	// Logic to skip disclaimer if profiles already exist
-	homeDir, _ := os.UserHomeDir()
-	configDir := filepath.Join(homeDir, ".config", "animasola")
+	configRoot, _ := os.UserConfigDir()
+	configDir := filepath.Join(configRoot, "animasola")
 	entries, _ := os.ReadDir(configDir)
 
 	hasProfiles := false
@@ -115,7 +119,7 @@ func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case AppBootstrappedMsg:
 		m.store = msg.Store
 		m.torRunner = msg.TorRunner
-		m.appView = NewAppModel(msg.Store, msg.User, msg.Keys, msg.TorConfig, msg.ProgressCh)
+		m.appView = NewAppModel(msg.Store, msg.User, msg.Keys, msg.TorConfig, msg.TorRunner, msg.TorStartTime, msg.ProgressCh, msg.Version)
 
 		// Pass the existing dimensions so AppModel can cascade them
 		if m.width > 0 && m.height > 0 {
@@ -171,11 +175,11 @@ func (m *RootModel) View() string {
 
 func (m *RootModel) bootstrapAppCmd(username string) tea.Cmd {
 	return func() tea.Msg {
-		homeDir, err := os.UserHomeDir()
+		configRoot, err := os.UserConfigDir()
 		if err != nil {
-			return BootstrapErrMsg{fmt.Errorf("error getting home directory: %w", err)}
+			return BootstrapErrMsg{fmt.Errorf("error getting config directory: %w", err)}
 		}
-		configDir := filepath.Join(homeDir, ".config", "animasola", username)
+		configDir := filepath.Join(configRoot, "animasola", username)
 		if err := os.MkdirAll(configDir, 0700); err != nil {
 			return BootstrapErrMsg{fmt.Errorf("error creating config directory: %w", err)}
 		}
@@ -192,14 +196,19 @@ func (m *RootModel) bootstrapAppCmd(username string) tea.Cmd {
 
 		st.StartDataPruning(m.ctx, 30*24*time.Hour)
 
-		user, err := st.GetOrCreateUser(m.ctx, username)
-		if err != nil {
-			return BootstrapErrMsg{fmt.Errorf("error getting/creating user: %w", err)}
-		}
-
 		keys, err := keys.GetOrGenerateKey(username)
 		if err != nil {
 			return BootstrapErrMsg{fmt.Errorf("error loading identity: %w", err)}
+		}
+
+		hostID, err := keys.PeerID()
+		if err != nil {
+			return BootstrapErrMsg{fmt.Errorf("error generating peer ID for database mapping: %w", err)}
+		}
+
+		user, err := st.GetOrCreateUser(m.ctx, username, hostID)
+		if err != nil {
+			return BootstrapErrMsg{fmt.Errorf("error getting/creating user: %w", err)}
 		}
 
 		torBinary, err := tor.EnsureTorBinary(configDir)
@@ -207,8 +216,9 @@ func (m *RootModel) bootstrapAppCmd(username string) tea.Cmd {
 			return BootstrapErrMsg{fmt.Errorf("error gathering Tor executable: %w", err)}
 		}
 
-		socksPort := 45000 + int(time.Now().UnixMilli()%10000)
-		torConfig, err := tor.GenerateConfig(configDir, 4001, socksPort)
+		listenPort := 4001 + deterministicOffset(username, 2000)
+		socksPort := 45000 + deterministicOffset(username, 10000)
+		torConfig, err := tor.GenerateConfig(configDir, listenPort, socksPort)
 		if err != nil {
 			return BootstrapErrMsg{fmt.Errorf("error configuring Tor wrapper: %w", err)}
 		}
@@ -224,16 +234,55 @@ func (m *RootModel) bootstrapAppCmd(username string) tea.Cmd {
 		os.Setenv("HTTPS_PROXY", socksAddr)
 
 		return AppBootstrappedMsg{
-			Store:      st,
-			User:       user,
-			Keys:       keys,
-			TorConfig:  torConfig,
-			TorRunner:  torRunner,
-			ProgressCh: progressCh,
+			Store:        st,
+			User:         user,
+			Keys:         keys,
+			TorConfig:    torConfig,
+			TorRunner:    torRunner,
+			ProgressCh:   progressCh,
+			TorStartTime: time.Now(), // Fallback if `torStartTime` from RootModel isn't accessible here
+			Version:      version.Current,
 		}
+	}
+}
+
+func deterministicOffset(seed string, span int) int {
+	offset := 0
+	for _, r := range seed {
+		offset += int(r)
+	}
+	return offset % span
+}
+
+func (m *RootModel) Shutdown() {
+	if m.appView != nil {
+		m.appView.Shutdown()
+	}
+	if m.torRunner != nil {
+		m.torRunner.Stop()
+	}
+	if m.store != nil {
+		m.store.Close()
 	}
 }
 
 func Start(ctx context.Context) *tea.Program {
 	return tea.NewProgram(NewRootModel(ctx), tea.WithAltScreen())
+}
+
+// GetTelemetry allows the outer main() wrapper to safely extract the Tor telemetry
+// engine in the event of an unexpected Bubbletea UI crash (recover block).
+func (m *RootModel) GetTelemetry() *telemetry.Service {
+	if m.appView != nil && m.appView.node != nil {
+		return m.appView.node.Telemetry
+	}
+	return nil
+}
+
+// GetCurrentView returns a debugging string to identify exactly what UI component panicked.
+func (m *RootModel) GetCurrentView() string {
+	if m.state == "app" && m.appView != nil {
+		return fmt.Sprintf("app:%s", m.appView.currentView)
+	}
+	return m.state
 }

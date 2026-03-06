@@ -19,31 +19,12 @@ type GitHubRelease struct {
 	HtmlURL string `json:"html_url"`
 }
 
-// FetchLatestRelease anonymously polls the GitHub API over the Tor SOCKS5 proxy
-// provided by the ALL_PROXY environment variable set during Tor bootstrap.
+// FetchLatestRelease polls the GitHub API.
+// If ALL_PROXY is set, it routes through that proxy; otherwise it uses a direct client.
 func FetchLatestRelease() (*GitHubRelease, error) {
-	proxyStr := os.Getenv("ALL_PROXY")
-	if proxyStr == "" {
-		return nil, fmt.Errorf("ALL_PROXY not set, refusing to leak IP")
-	}
-
-	proxyURL, err := url.Parse(proxyStr)
+	client, err := newHTTPClient()
 	if err != nil {
-		return nil, fmt.Errorf("invalid ALL_PROXY url: %w", err)
-	}
-
-	dialer, err := proxy.FromURL(proxyURL, proxy.Direct)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create proxy dialer: %w", err)
-	}
-
-	transport := &http.Transport{
-		Dial: dialer.Dial,
-	}
-
-	client := &http.Client{
-		Timeout:   time.Second * 15,
-		Transport: transport,
+		return nil, err
 	}
 
 	req, err := http.NewRequest("GET", githubLatestReleaseURL, nil)
@@ -88,29 +69,11 @@ func FetchLatestRelease() (*GitHubRelease, error) {
 // DownloadReleaseAsset leverages the Tor SOCKS5 proxy to download the target OS binary
 // identically to how FetchLatestRelease checks versions. It writes the result to outPath.
 func DownloadReleaseAsset(downloadURL string, outPath string) error {
-	proxyStr := os.Getenv("ALL_PROXY")
-	if proxyStr == "" {
-		return fmt.Errorf("ALL_PROXY not set, refusing to leak IP")
-	}
-
-	proxyURL, err := url.Parse(proxyStr)
+	client, err := newHTTPClient()
 	if err != nil {
-		return fmt.Errorf("invalid ALL_PROXY url: %w", err)
+		return err
 	}
-
-	dialer, err := proxy.FromURL(proxyURL, proxy.Direct)
-	if err != nil {
-		return fmt.Errorf("failed to create proxy dialer: %w", err)
-	}
-
-	transport := &http.Transport{
-		Dial: dialer.Dial,
-	}
-
-	client := &http.Client{
-		Timeout:   time.Minute * 10, // Binaries are 15MB, Tor can be slow.
-		Transport: transport,
-	}
+	client.Timeout = time.Minute * 10 // Binaries are large and proxies may be slow.
 
 	req, err := http.NewRequest("GET", downloadURL, nil)
 	if err != nil {
@@ -152,4 +115,26 @@ func DownloadReleaseAsset(downloadURL string, outPath string) error {
 	}
 
 	return nil
+}
+
+func newHTTPClient() (*http.Client, error) {
+	transport := &http.Transport{}
+	proxyStr := os.Getenv("ALL_PROXY")
+	if proxyStr != "" {
+		proxyURL, err := url.Parse(proxyStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid ALL_PROXY url: %w", err)
+		}
+
+		dialer, err := proxy.FromURL(proxyURL, proxy.Direct)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create proxy dialer: %w", err)
+		}
+		transport.Dial = dialer.Dial
+	}
+
+	return &http.Client{
+		Timeout:   15 * time.Second,
+		Transport: transport,
+	}, nil
 }

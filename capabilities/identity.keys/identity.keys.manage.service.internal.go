@@ -3,12 +3,15 @@ package keys
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
+	crypto "github.com/libp2p/go-libp2p/core/crypto"
+	peer "github.com/libp2p/go-libp2p/core/peer"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -23,13 +26,40 @@ func (k *Keys) Fingerprint() string {
 	return ssh.FingerprintSHA256(k.PublicKey)
 }
 
-// HasKey returns true if the application-specific Ed25519 key exists.
-func HasKey(username string) bool {
-	homeDir, err := os.UserHomeDir()
+// Sign creates a base64-encoded Ed25519 signature for the payload.
+func (k *Keys) Sign(payload []byte) string {
+	return base64.StdEncoding.EncodeToString(ed25519.Sign(k.PrivateKey, payload))
+}
+
+// VerifySignature validates a base64-encoded Ed25519 signature for the payload.
+func VerifySignature(pub ed25519.PublicKey, payload []byte, signature string) bool {
+	sigBytes, err := base64.StdEncoding.DecodeString(signature)
 	if err != nil {
 		return false
 	}
-	keyPath := filepath.Join(homeDir, ".config", "animasola", username, "id_ed25519")
+	return ed25519.Verify(pub, payload, sigBytes)
+}
+
+// PeerID returns the deterministic Libp2p Peer ID string representation of this key.
+func (k *Keys) PeerID() (string, error) {
+	privKey, err := crypto.UnmarshalEd25519PrivateKey(k.PrivateKey)
+	if err != nil {
+		return "", err
+	}
+	id, err := peer.IDFromPublicKey(privKey.GetPublic())
+	if err != nil {
+		return "", err
+	}
+	return id.String(), nil
+}
+
+// HasKey returns true if the application-specific Ed25519 key exists.
+func HasKey(username string) bool {
+	configRoot, err := os.UserConfigDir()
+	if err != nil {
+		return false
+	}
+	keyPath := filepath.Join(configRoot, "animasola", username, "id_ed25519")
 	_, err = os.Stat(keyPath)
 	return err == nil
 }
@@ -37,12 +67,12 @@ func HasKey(username string) bool {
 // GetOrGenerateKey ensures an application-specific Ed25519 keypair exists
 // in ~/.config/animasola/<username>/id_ed25519. It will NOT read or touch ~/.ssh.
 func GetOrGenerateKey(username string) (*Keys, error) {
-	homeDir, err := os.UserHomeDir()
+	configRoot, err := os.UserConfigDir()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get home dir: %w", err)
+		return nil, fmt.Errorf("failed to get config dir: %w", err)
 	}
 
-	configDir := filepath.Join(homeDir, ".config", "animasola", username)
+	configDir := filepath.Join(configRoot, "animasola", username)
 	keyPath := filepath.Join(configDir, "id_ed25519")
 
 	// Ensure the config directory exists

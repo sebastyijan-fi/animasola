@@ -2,23 +2,16 @@ package sqlite_test
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	sqlite "github.com/sebastyijan/animasola/capabilities/storage.sqlite"
 )
 
 func TestSQLiteDataBoundaries(t *testing.T) {
-	username := "test_agent_beta_" + time.Now().Format("150405")
-	homeDir, _ := os.UserHomeDir()
-	configDir := filepath.Join(homeDir, ".config", "animasola", username)
-	os.MkdirAll(configDir, 0700)
+	configDir := t.TempDir()
 	dbPath := filepath.Join(configDir, "animasola.db")
-
-	defer os.RemoveAll(configDir)
 
 	// 1. Boot Database
 	store, err := sqlite.Open(dbPath)
@@ -30,10 +23,12 @@ func TestSQLiteDataBoundaries(t *testing.T) {
 		t.Fatalf("Failed to migrate SQLite schema: %v", err)
 	}
 
-	// 2. Test User Insertion (Truncation)
-	user, err := store.GetOrCreateUser(ctx, username)
+	// Create mock user
+	username := "testuser"
+	explicitID := "test_explicit_id"
+	user, err := store.GetOrCreateUser(ctx, username, explicitID)
 	if err != nil {
-		t.Fatalf("Failed to create user: %v", err)
+		t.Fatalf("failed to create user: %v", err)
 	}
 
 	// 3. Test Hostile Network Payload Truncation (Room Creation)
@@ -73,5 +68,69 @@ func TestSQLiteDataBoundaries(t *testing.T) {
 				t.Fatalf("SQLite WAL queue failed under threading stress: %v", err)
 			}
 		}
+	}
+}
+
+func TestPublicRoomMetadataVersioning(t *testing.T) {
+	configDir := t.TempDir()
+	dbPath := filepath.Join(configDir, "animasola.db")
+
+	store, err := sqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to open SQLite: %v", err)
+	}
+	ctx := context.Background()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("Failed to migrate SQLite schema: %v", err)
+	}
+
+	owner, err := store.GetOrCreateUser(ctx, "owner", "owner_peer")
+	if err != nil {
+		t.Fatalf("failed to create owner: %v", err)
+	}
+
+	room, err := store.CreateRoom(ctx, "alpha", "first", owner.ID, false, "")
+	if err != nil {
+		t.Fatalf("failed to create room: %v", err)
+	}
+	if room.Version != 1 {
+		t.Fatalf("expected initial version 1, got %d", room.Version)
+	}
+
+	updated, err := store.UpdatePublicRoomMetadata(ctx, room.ID, owner.ID, "beta", "second", "sig-v2")
+	if err != nil {
+		t.Fatalf("failed to update room metadata: %v", err)
+	}
+	if updated.Version != 2 {
+		t.Fatalf("expected bumped version 2, got %d", updated.Version)
+	}
+
+	stale := &sqlite.Room{
+		ID:          room.ID,
+		Name:        "stale",
+		Description: "stale-desc",
+		CreatorID:   owner.ID,
+		Signature:   "sig-v1",
+		CreatedAt:   room.CreatedAt,
+		UpdatedAt:   room.CreatedAt,
+		LastSeenAt:  updated.LastSeenAt,
+		Version:     1,
+	}
+	if err := store.UpsertPublicRoomIndex(ctx, stale); err != nil {
+		t.Fatalf("failed to upsert stale room index entry: %v", err)
+	}
+
+	rooms, err := store.SearchAllRooms(ctx)
+	if err != nil {
+		t.Fatalf("failed to search rooms: %v", err)
+	}
+	if len(rooms) != 1 {
+		t.Fatalf("expected exactly one indexed public room, got %d", len(rooms))
+	}
+	if rooms[0].Name != "beta" {
+		t.Fatalf("expected newer metadata to win, got name %q", rooms[0].Name)
+	}
+	if rooms[0].Version != 2 {
+		t.Fatalf("expected newer version 2 to survive, got %d", rooms[0].Version)
 	}
 }

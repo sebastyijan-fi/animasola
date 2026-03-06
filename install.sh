@@ -1,43 +1,66 @@
 #!/usr/bin/env bash
 
-set -e
+set -euo pipefail
 
 echo "======================================"
-echo "    Animasola Local Installer         "
+echo "      Animasola Bundle Installer      "
 echo "======================================"
 
-# Determine target OS and Arch
-OS=$(uname | tr '[:upper:]' '[:lower:]')
-ARCH=$(uname -m)
-case $ARCH in
-    x86_64) ARCH="amd64" ;;
-    aarch64|arm64) ARCH="arm64" ;;
-    *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
-esac
-
-echo "-> Detected System: $OS ($ARCH)"
-
-# Since we don't have GitHub releases built yet, we will compile it locally
-# Requires the Go toolchain to be installed.
-if ! command -v go &> /dev/null; then
-    echo "ERROR: 'go' is not installed. Please install Go to build Animasola."
+if [[ $# -lt 1 ]]; then
+    echo "Usage: ./install.sh /path/to/animasola-<os>-<arch>.tar.gz"
     exit 1
 fi
 
-echo "-> Building Animasola binary from source..."
-go build -o /tmp/animasola ./cmd/animasola/main.go
+BUNDLE_ARCHIVE="$1"
+INSTALL_ROOT="${ANIMASOLA_INSTALL_ROOT:-/usr/local/lib/animasola}"
+BIN_TARGET="${ANIMASOLA_BIN_TARGET:-/usr/local/bin/animasola}"
+TMP_DIR="$(mktemp -d)"
+SUDO="${SUDO_BIN:-sudo}"
+INSTALL_PARENT="$(dirname "$INSTALL_ROOT")"
+BIN_PARENT="$(dirname "$BIN_TARGET")"
 
-echo "-> Installing binary to /usr/local/bin/animasola"
-echo "-> Subject to sudo requirements..."
-sudo mv /tmp/animasola /usr/local/bin/animasola
-sudo chmod +x /usr/local/bin/animasola
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+if [[ ! -f "$BUNDLE_ARCHIVE" ]]; then
+    echo "ERROR: bundle archive not found: $BUNDLE_ARCHIVE"
+    exit 1
+fi
+
+echo "-> Extracting release bundle..."
+tar -xzf "$BUNDLE_ARCHIVE" -C "$TMP_DIR"
+
+BUNDLE_DIR="$(find "$TMP_DIR" -maxdepth 1 -mindepth 1 -type d | head -n 1)"
+if [[ -z "$BUNDLE_DIR" ]]; then
+    echo "ERROR: could not find extracted bundle directory"
+    exit 1
+fi
+
+echo "-> Installing bundle into $INSTALL_ROOT"
+mkdir -p "$INSTALL_PARENT" "$BIN_PARENT"
+if [[ -w "$INSTALL_PARENT" && -w "$BIN_PARENT" ]]; then
+    SUDO=""
+fi
+
+$SUDO rm -rf "$INSTALL_ROOT"
+$SUDO mkdir -p "$INSTALL_ROOT"
+$SUDO cp -R "$BUNDLE_DIR"/. "$INSTALL_ROOT"/
+$SUDO chmod +x "$INSTALL_ROOT/animasola"
+if [[ -f "$INSTALL_ROOT/tor/tor" ]]; then
+    $SUDO chmod +x "$INSTALL_ROOT/tor/tor"
+fi
+
+echo "-> Installing launcher symlink into $BIN_TARGET"
+$SUDO mkdir -p "$BIN_PARENT"
+$SUDO ln -sf "$INSTALL_ROOT/animasola" "$BIN_TARGET"
 
 echo "======================================"
-echo "        Installation Complete!        "
-echo ""
-echo " You can now launch the application "
-echo " from any terminal by typing:      "
-echo ""
-echo "             animasola                "
-echo ""
-echo "======================================"
+echo "Installation complete."
+echo
+echo "Run:"
+echo "  animasola"
+echo
+echo "Verify:"
+echo "  animasola doctor"

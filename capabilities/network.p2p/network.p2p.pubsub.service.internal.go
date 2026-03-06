@@ -5,16 +5,15 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"time"
 
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	sqlite "github.com/sebastyijan/animasola/capabilities/storage.sqlite"
-	"golang.org/x/crypto/argon2"
 )
 
 func logDebug(format string, a ...interface{}) {
@@ -49,7 +48,7 @@ type Room struct {
 }
 
 // JoinRoom subscribes to a GossipSub topic for the given room ID
-func (n *Node) JoinRoom(roomID string, isPrivate bool, password string) (*Room, error) {
+func (n *Node) JoinRoom(roomID string, isPrivate bool, password string, requireDHT bool) (*Room, error) {
 	topicName := fmt.Sprintf("animasola/room/%s", roomID)
 	topic, err := n.PubSub.Join(topicName)
 	if err != nil {
@@ -63,10 +62,12 @@ func (n *Node) JoinRoom(roomID string, isPrivate bool, password string) (*Room, 
 
 	var rKey []byte
 	if isPrivate && password != "" {
-		// Use Argon2id for Key Derivation to protect against offline dictionary attacks
-		// We use a deterministic salt based on the roomID so peers generate the same key
-		salt := sha256.Sum256([]byte(roomID))
-		rKey = argon2.IDKey([]byte(password), salt[:], 1, 64*1024, 4, 32)
+		// Accept either the raw password or a stored derived room key.
+		rKey, err = sqlite.DecodeOrDerivePrivateRoomKey(roomID, password)
+		if err != nil {
+			_ = topic.Close()
+			return nil, fmt.Errorf("failed to prepare room key: %w", err)
+		}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -80,7 +81,77 @@ func (n *Node) JoinRoom(roomID string, isPrivate bool, password string) (*Room, 
 		RoomKey:   rKey,
 	}
 
+	// UX HARDENING: If this is a public room search join, we must verify the DHT actually resolved a peer.
+	// If the user tries to join a ghost room that everyone has left, waiting 5 seconds and gracefully rejecting
+	// is infinitely better than dumping them into a broken empty UI.
+	// REQUIREDHT: Only execute this block if explicitly told to via a Remote Search action.
+	if !isPrivate && requireDHT {
+		timeout := time.After(5 * time.Second)
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+
+		peerFound := false
+	CheckLoop:
+		for {
+			select {
+			case <-timeout:
+				break CheckLoop
+			case <-ticker.C:
+				if len(topic.ListPeers()) > 0 {
+					peerFound = true
+					break CheckLoop
+				}
+			}
+		}
+
+		if !peerFound {
+			r.LeaveRoom()
+			return nil, fmt.Errorf("Room does not exist or all hosts are offline. Press 'c' to create it locally.")
+		}
+	}
+
 	return r, nil
+}
+
+// WaitForRoomPeers blocks until at least 1 peer is found on the topic, or the timeout is reached.
+// We use this to hold the user in a loading screen while the Tor DHT resolves.
+func (n *Node) WaitForRoomPeers(ctx context.Context, roomID string, timeout time.Duration) error {
+	startTime := time.Now()
+	topicName := fmt.Sprintf("animasola/room/%s", roomID)
+
+	// Join the topic to actively probe the GossipSub mesh
+	topic, err := n.PubSub.Join(topicName)
+	if err != nil {
+		return fmt.Errorf("failed to join topic for peer resolution: %w", err)
+	}
+	// We deliberately leave the topic "Join" open here! When the user officially drops
+	// into the RoomModel and calls JoinRoom natively, pubsub handles the de-duplication
+	// and they instantiate instantly without dropping the mesh connection!
+
+	timeoutCh := time.After(timeout)
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-timeoutCh:
+			topic.Close()
+			return fmt.Errorf("Room does not exist or all hosts are offline. Press 'c' to create it locally.")
+		case <-ticker.C:
+			if len(topic.ListPeers()) > 0 {
+				if n.Telemetry != nil {
+					duration := int(time.Since(startTime).Milliseconds())
+					n.Telemetry.RecordEvent(ctx, "DHT_Resolution_Latency", duration, map[string]string{
+						"action": "room_join",
+					}, runtime.GOOS, runtime.GOARCH)
+				}
+				return nil
+			}
+		case <-ctx.Done():
+			topic.Close()
+			return ctx.Err()
+		}
+	}
 }
 
 // LeaveRoom unsubscribes from the topic
@@ -198,6 +269,10 @@ func (r *Room) Listen(db *sqlite.Store, hostID string, onNewMessage func(sqlite.
 			if username == "" {
 				username = "Guest-" + netMsg.AuthorID[:8]
 			}
+			usernameRunes := []rune(username)
+			if len(usernameRunes) > 32 {
+				username = string(usernameRunes[:32])
+			}
 			err = db.EnsureRemoteUserExists(r.ctx, netMsg.AuthorID, username)
 			if err != nil {
 				logDebug("Listen: failed to ensure remote user: %v", err)
@@ -246,6 +321,10 @@ func (r *Room) Listen(db *sqlite.Store, hostID string, onNewMessage func(sqlite.
 
 			// If the message brings a RoomName, we should update our local stub room if it's currently generic
 			if netMsg.RoomName != "" && netMsg.RoomName != "Remote Room" {
+				roomNameRunes := []rune(netMsg.RoomName)
+				if len(roomNameRunes) > 64 {
+					netMsg.RoomName = string(roomNameRunes[:64])
+				}
 				db.UpdateRoomNameIfDefault(r.ctx, netMsg.RoomID, netMsg.RoomName)
 			}
 

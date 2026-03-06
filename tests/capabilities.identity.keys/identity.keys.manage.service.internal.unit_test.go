@@ -11,6 +11,8 @@ import (
 )
 
 func TestEd25519IdentityLifecycle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
 	// 1. Setup isolated agent test environment
 	username := "test_agent_alpha_" + time.Now().Format("150405")
 

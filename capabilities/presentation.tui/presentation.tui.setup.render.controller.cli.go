@@ -94,7 +94,7 @@ func (m *SetupModel) View() string {
 
 		s.WriteString(warningStyle.Render("We will never touch or read your system SSH keys (~/.ssh).") + "\n\n")
 
-		safeDesc := fmt.Sprintf("Animasola will generate an isolated Ed25519 keypair and securely store it in:\n%s", highlightStyle.Render("~/.config/animasola/id_ed25519"))
+		safeDesc := fmt.Sprintf("Animasola will generate an isolated Ed25519 keypair and securely store it in your config directory:\n%s", highlightStyle.Render("$XDG_CONFIG_HOME/animasola/<profile>/id_ed25519"))
 		s.WriteString(textStyle.Render(safeDesc) + "\n\n")
 
 		s.WriteString(textStyle.Render("Do you consent to generating this application-specific key?"))

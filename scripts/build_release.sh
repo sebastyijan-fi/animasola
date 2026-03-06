@@ -1,36 +1,89 @@
 #!/usr/bin/env bash
 
-set -e
+set -euo pipefail
 
-echo "================================================="
-echo "   Building Animasola Releases (Linux & macOS)   "
-echo "================================================="
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RELEASES_DIR="$ROOT_DIR/releases"
 
-# Create releases directory
-rm -rf releases/
-mkdir -p releases/
+echo "=========================================================="
+echo "   Building Animasola Release Bundles (with bundled Tor)  "
+echo "=========================================================="
 
-# 1. Linux AMD64
-echo "Building Linux amd64..."
-GOOS=linux GOARCH=amd64 go build -o releases/animasola-linux-amd64 cmd/animasola/main.go
+rm -rf "$RELEASES_DIR"
+mkdir -p "$RELEASES_DIR"
 
-# 2. Linux ARM64 (Raspberry Pi, etc)
-echo "Building Linux arm64..."
-GOOS=linux GOARCH=arm64 go build -o releases/animasola-linux-arm64 cmd/animasola/main.go
+resolve_tor_binary() {
+    local os="$1"
+    local arch="$2"
 
-# 3. macOS Intel
-echo "Building macOS amd64..."
-GOOS=darwin GOARCH=amd64 go build -o releases/animasola-darwin-amd64 cmd/animasola/main.go
+    if [[ -n "${ANIMASOLA_TOR_BIN:-}" && -f "${ANIMASOLA_TOR_BIN}" ]]; then
+        printf '%s' "${ANIMASOLA_TOR_BIN}"
+        return 0
+    fi
 
-# 4. macOS Apple Silicon (M1/M2/M3)
-echo "Building macOS arm64..."
-GOOS=darwin GOARCH=arm64 go build -o releases/animasola-darwin-arm64 cmd/animasola/main.go
+    if [[ "$os" == "$(uname | tr '[:upper:]' '[:lower:]')" ]]; then
+        if command -v tor >/dev/null 2>&1; then
+            command -v tor
+            return 0
+        fi
+    fi
 
-echo "================================================="
-echo "Generating SHA256 checksums for security verification..."
-cd releases
-sha256sum animasola-* > checksums.txt
-cd ..
+    local bundled="$ROOT_DIR/tor/${os}-${arch}/tor"
+    if [[ "$os" == "windows" ]]; then
+        bundled="$ROOT_DIR/tor/${os}-${arch}/tor.exe"
+    fi
+    if [[ -f "$bundled" ]]; then
+        printf '%s' "$bundled"
+        return 0
+    fi
 
-echo "================================================="
-echo "Done! Upload the 4 binaries AND checksums.txt to the GitHub 'Releases' page."
+    return 1
+}
+
+build_bundle() {
+    local os="$1"
+    local arch="$2"
+    local artifact="animasola-${os}-${arch}"
+    local bundle_dir="$RELEASES_DIR/$artifact"
+
+    echo "Building $artifact..."
+    mkdir -p "$bundle_dir/tor"
+    GOOS="$os" GOARCH="$arch" go build -o "$bundle_dir/animasola" "$ROOT_DIR/cmd/animasola/main.go"
+    cp "$ROOT_DIR/install.sh" "$bundle_dir/install.sh"
+    cp "$ROOT_DIR/README.md" "$bundle_dir/README.md"
+    chmod +x "$bundle_dir/install.sh"
+
+    if tor_bin="$(resolve_tor_binary "$os" "$arch")"; then
+        cp "$tor_bin" "$bundle_dir/tor/"
+        chmod +x "$bundle_dir/tor/"*
+        echo "  bundled tor: $tor_bin"
+    else
+        echo "  warning: tor binary not found for $artifact"
+        echo "  release will require system tor or ANIMASOLA_TOR_BIN"
+    fi
+
+    (
+        cd "$RELEASES_DIR"
+        tar -czf "${artifact}.tar.gz" "$artifact"
+    )
+}
+
+build_bundle linux amd64
+build_bundle linux arm64
+build_bundle darwin amd64
+build_bundle darwin arm64
+
+(
+    cd "$RELEASES_DIR"
+    sha256sum ./*.tar.gz > checksums.txt
+)
+
+echo "=========================================================="
+echo "Done."
+echo "Artifacts:"
+echo "  releases/animasola-<os>-<arch>.tar.gz"
+echo "  releases/checksums.txt"
+echo
+echo "If you want bundled Tor, provide one of:"
+echo "  1. ANIMASOLA_TOR_BIN=/path/to/tor"
+echo "  2. ./tor/<os>-<arch>/tor"

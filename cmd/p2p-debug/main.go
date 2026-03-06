@@ -6,9 +6,9 @@ import (
 	"log"
 	"time"
 
-	"github.com/sebastyijan/animasola/capabilities/identity.keys"
-	"github.com/sebastyijan/animasola/capabilities/network.p2p"
-	"github.com/sebastyijan/animasola/capabilities/storage.sqlite"
+	keys "github.com/sebastyijan/animasola/capabilities/identity.keys"
+	p2p "github.com/sebastyijan/animasola/capabilities/network.p2p"
+	sqlite "github.com/sebastyijan/animasola/capabilities/storage.sqlite"
 )
 
 func main() {
@@ -17,13 +17,13 @@ func main() {
 	// 1. Setup Snipa (Sender)
 	snipaDB, _ := sqlite.Open("/tmp/snipa_test.db")
 	snipaDB.Migrate(context.Background())
-	snipaUser, _ := snipaDB.GetOrCreateUser(context.Background(), "snipa")
 	snipaKeys, _ := keys.GetOrGenerateKey("snipa")
-	snipaNode, err := p2p.NewNode(snipaKeys, "snipajkl3456789123456789123456789123456789123456789")
+	snipaNode, err := p2p.NewNode(snipaKeys, "snipajkl3456789123456789123456789123456789123456789", 4001)
 	if err != nil {
 		log.Fatal("Snipa Node Error:", err)
 	}
 	defer snipaNode.Close()
+	snipaUser, _ := snipaDB.GetOrCreateUser(context.Background(), "snipa", snipaNode.Host.ID().String())
 	fmt.Println("Snipa Peer ID:", snipaNode.Host.ID().String())
 	r, err := snipaDB.CreateRoom(context.Background(), "Test Room", "", snipaUser.ID, false, "")
 	if err != nil {
@@ -35,13 +35,13 @@ func main() {
 	// 2. Setup Bob (Receiver)
 	bobDB, _ := sqlite.Open("/tmp/bob_test.db")
 	bobDB.Migrate(context.Background())
-	bobUser, _ := bobDB.GetOrCreateUser(context.Background(), "bob")
 	bobKeys, _ := keys.GetOrGenerateKey("bob")
-	bobNode, err := p2p.NewNode(bobKeys, "bobjkl3456789123456789123456789123456789123456789")
+	bobNode, err := p2p.NewNode(bobKeys, "bobjkl3456789123456789123456789123456789123456789", 4002)
 	if err != nil {
 		log.Fatal("Bob Node Error:", err)
 	}
 	defer bobNode.Close()
+	bobUser, _ := bobDB.GetOrCreateUser(context.Background(), "bob", bobNode.Host.ID().String())
 	_, err = bobDB.JoinExternalRoom(context.Background(), roomID, "Test Room", bobUser.ID, false, "")
 	if err != nil {
 		log.Fatal("Bob JoinExternalRoom Error:", err)
@@ -52,8 +52,15 @@ func main() {
 	time.Sleep(5 * time.Second)
 
 	// 3. Both Join Topic
-	snipaRoom, _ := snipaNode.JoinRoom(roomID, false, "")
-	bobRoom, _ := bobNode.JoinRoom(roomID, false, "")
+	fmt.Println("[P2P] Both nodes joining room...")
+	snipaRoom, err := snipaNode.JoinRoom(roomID, false, "", false)
+	if err != nil {
+		log.Fatalf("Failed to join room for Snipa: %v", err)
+	}
+	bobRoom, err := bobNode.JoinRoom(roomID, false, "", false)
+	if err != nil {
+		log.Fatalf("Failed to join room for Bob: %v", err)
+	}
 
 	// 4. Bob Starts Listening
 	fmt.Println("Bob listening on topic...")

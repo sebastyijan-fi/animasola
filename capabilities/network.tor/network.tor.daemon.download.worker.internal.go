@@ -3,18 +3,25 @@ package tor
 import (
 	"archive/tar"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 )
 
-// EnsureTorBinary checks if the Tor executable exists in the config directory.
-// If it does not, it downloads the official pre-compiled binary for the host OS.
+// EnsureTorBinary resolves a Tor executable deterministically.
+// Resolution order:
+// 1. ANIMASOLA_TOR_BIN
+// 2. binary already stored in the app config dir
+// 3. bundled tor next to the current executable
+// 4. system tor on PATH
+// 5. runtime download only if ANIMASOLA_ALLOW_TOR_DOWNLOAD=1
 func EnsureTorBinary(configDir string) (string, error) {
 	torDir := filepath.Join(configDir, "tor")
 	if err := os.MkdirAll(torDir, 0700); err != nil {
@@ -27,9 +34,27 @@ func EnsureTorBinary(configDir string) (string, error) {
 	}
 	binaryPath := filepath.Join(torDir, binaryName)
 
-	// Check if already downloaded
+	if envPath := strings.TrimSpace(os.Getenv("ANIMASOLA_TOR_BIN")); envPath != "" {
+		if _, err := os.Stat(envPath); err == nil {
+			return envPath, nil
+		}
+		return "", fmt.Errorf("ANIMASOLA_TOR_BIN points to missing file: %s", envPath)
+	}
+
 	if _, err := os.Stat(binaryPath); err == nil {
 		return binaryPath, nil
+	}
+
+	if bundledPath, err := bundledTorPath(binaryName); err == nil {
+		return bundledPath, nil
+	}
+
+	if pathTor, err := exec.LookPath(binaryName); err == nil {
+		return pathTor, nil
+	}
+
+	if os.Getenv("ANIMASOLA_ALLOW_TOR_DOWNLOAD") != "1" {
+		return "", errors.New("tor executable not found; install tor, bundle it with the release, or set ANIMASOLA_TOR_BIN")
 	}
 
 	fmt.Printf("\n[Tor Manager] Downloading official Tor binary for %s/%s. This may take a minute...\n", runtime.GOOS, runtime.GOARCH)
@@ -52,6 +77,23 @@ func EnsureTorBinary(configDir string) (string, error) {
 
 	fmt.Println("[Tor Manager] Tor downloaded successfully!")
 	return binaryPath, nil
+}
+
+func bundledTorPath(binaryName string) (string, error) {
+	execPath, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	candidates := []string{
+		filepath.Join(filepath.Dir(execPath), "tor", binaryName),
+		filepath.Join(filepath.Dir(execPath), binaryName),
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, nil
+		}
+	}
+	return "", os.ErrNotExist
 }
 
 func getDownloadURL() (string, error) {
