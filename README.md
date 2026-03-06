@@ -1,6 +1,6 @@
 # Animasola
 
-A terminal community platform for developers. SSH in, you're in. No signup, no app, no browser. Your SSH key is your identity. Chat, post, discuss in threaded communities. Fills the quiet moments while your AI agent works. One repo, one binary, self-hostable.
+A terminal sanctuary for developers. No signup, no web app, no central servers. Your cryptographic key is your absolute identity. Chat, post, and discuss in heavily encrypted, decentralized networks routed automatically over Tor. Designed to fill the quiet moments while your AI agent works. One repository, one binary, total privacy.
 
 ## Usage
 
