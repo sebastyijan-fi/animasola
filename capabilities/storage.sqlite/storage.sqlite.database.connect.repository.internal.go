@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	_ "embed"
 	"fmt"
+	"os"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -20,26 +22,22 @@ type syncJob struct {
 
 type Store struct {
 	db        *sql.DB
+	dbPath    string
 	syncQueue chan syncJob
 	ctx       context.Context
 	cancel    context.CancelFunc
 }
 
 func Open(dbPath string) (*Store, error) {
-	// Enable foreign keys, WAL mode, and a busy timeout for better concurrency/safety
-	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)", dbPath)
-	db, err := sql.Open("sqlite", dsn)
+	db, err := openSQLiteDB(dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
-	}
-
-	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("ping sqlite: %w", err)
+		return nil, err
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	store := &Store{
 		db:        db,
+		dbPath:    dbPath,
 		syncQueue: make(chan syncJob, 10000), // Buffer against DHT floods
 		ctx:       ctx,
 		cancel:    cancel,
@@ -69,11 +67,22 @@ func (s *Store) processSyncQueue() {
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
+	if err := s.migrateOnce(ctx); err != nil {
+		if resetErr := s.resetDatabase(ctx); resetErr != nil {
+			return fmt.Errorf("migrate failed: %v; reset failed: %w", err, resetErr)
+		}
+		if err := s.migrateOnce(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) migrateOnce(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, schemaSQL)
 	if err != nil {
 		return fmt.Errorf("exec schema: %w", err)
 	}
-
 	// Simple migrations for Alpha: add new columns if they are missing.
 	// We ignore errors here because they will error if the column already exists.
 	// In a real production app, we would use a proper migration tool/table.
@@ -101,8 +110,46 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.backfillPublicRoomIndex(ctx); err != nil {
 		return err
 	}
-
 	return nil
+}
+
+func (s *Store) resetDatabase(ctx context.Context) error {
+	_ = ctx
+	s.cancel()
+	if err := s.db.Close(); err != nil {
+		return err
+	}
+
+	backupPath := fmt.Sprintf("%s.reset-%s.bak", s.dbPath, time.Now().UTC().Format("20060102T150405"))
+	if err := os.Rename(s.dbPath, backupPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	_ = os.Remove(s.dbPath + "-wal")
+	_ = os.Remove(s.dbPath + "-shm")
+
+	db, err := openSQLiteDB(s.dbPath)
+	if err != nil {
+		return err
+	}
+	newCtx, cancel := context.WithCancel(context.Background())
+	s.db = db
+	s.ctx = newCtx
+	s.cancel = cancel
+	s.syncQueue = make(chan syncJob, 10000)
+	go s.processSyncQueue()
+	return nil
+}
+
+func openSQLiteDB(dbPath string) (*sql.DB, error) {
+	dsn := fmt.Sprintf("file:%s?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)", dbPath)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+	if err := db.Ping(); err != nil {
+		return nil, fmt.Errorf("ping sqlite: %w", err)
+	}
+	return db, nil
 }
 
 func (s *Store) migrateRoomsNameUniqueness(ctx context.Context) error {
