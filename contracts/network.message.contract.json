@@ -1,0 +1,6 @@
+{
+  "input": {
+    "ID": "string",
+    "Content": "string"
+  }
+}

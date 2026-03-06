@@ -1,0 +1,3 @@
+{
+  "tables": ["rooms", "messages", "users", "memberships"]
+}

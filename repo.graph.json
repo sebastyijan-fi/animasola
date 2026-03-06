@@ -1,0 +1,36 @@
+{
+  "project": "animasola",
+  "nodes": [
+    "cmd.animasola.main",
+    "cmd.headless.main",
+    "cmd.debug.main",
+    "internal.identity",
+    "internal.network.discovery",
+    "internal.network.node",
+    "internal.network.pubsub",
+    "internal.store.db",
+    "internal.store.queries",
+    "internal.tor.config",
+    "internal.tor.manager",
+    "internal.tor.runner",
+    "internal.tui.app",
+    "internal.tui.views.home",
+    "internal.tui.views.room",
+    "internal.tui.views.setup",
+    "internal.tui.views.splash"
+  ],
+  "edges": [
+    ["internal.tui.app", "internal.network.node"],
+    ["internal.tui.app", "internal.tor.runner"],
+    ["internal.tui.app", "internal.store.db"],
+    ["internal.network.node", "internal.network.pubsub"],
+    ["internal.network.node", "internal.network.discovery"],
+    ["internal.network.node", "internal.identity"],
+    ["internal.network.pubsub", "internal.store.queries"],
+    ["internal.tor.runner", "internal.tor.manager"],
+    ["internal.tor.runner", "internal.tor.config"],
+    ["cmd.animasola.main", "internal.tui.app"],
+    ["cmd.headless.main", "internal.tor.runner"],
+    ["cmd.headless.main", "internal.network.node"]
+  ]
+}

@@ -1,0 +1,4 @@
+{
+  "capability": "storage.sqlite",
+  "description": "SQLite storage backend."
+}

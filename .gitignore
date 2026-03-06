@@ -1,5 +1,9 @@
-/animasola
-/animasola.db
-/data/
-/.DS_Store
-
+bin/
+animasola
+main
+*.db
+*.log
+.DS_Store
+*.AppImage
+*.zip
+*.tar.gz

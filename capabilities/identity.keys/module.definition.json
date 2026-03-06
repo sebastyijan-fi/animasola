@@ -1,0 +1,4 @@
+{
+  "capability": "identity.keys",
+  "description": "User identity key management."
+}

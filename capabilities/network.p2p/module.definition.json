@@ -1,0 +1,4 @@
+{
+  "capability": "network.p2p",
+  "description": "P2P network discovery and messaging."
+}

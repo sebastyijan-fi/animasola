@@ -1,0 +1,279 @@
+package p2p
+
+import (
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"time"
+
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
+	sqlite "github.com/sebastyijan/animasola/capabilities/storage.sqlite"
+	"golang.org/x/crypto/argon2"
+)
+
+func logDebug(format string, a ...interface{}) {
+	f, err := os.OpenFile("/tmp/network_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err == nil {
+		defer f.Close()
+		msg := fmt.Sprintf(format, a...)
+		f.WriteString(time.Now().Format(time.RFC3339) + " " + msg + "\n")
+	}
+}
+
+// NetworkMessage is the JSON payload we send over GossipSub
+type NetworkMessage struct {
+	ID             string `json:"id"`
+	RoomID         string `json:"room_id"`
+	RoomName       string `json:"room_name"`
+	AuthorID       string `json:"author_id"`
+	AuthorUsername string `json:"author_username"`
+	Content        string `json:"content"`
+	CreatedAt      string `json:"created_at"`
+}
+
+// Room represents an active PubSub subscription to a specific chat room
+type Room struct {
+	ID        string
+	Topic     *pubsub.Topic
+	Sub       *pubsub.Subscription
+	ctx       context.Context
+	cancel    context.CancelFunc
+	IsPrivate bool
+	RoomKey   []byte
+}
+
+// JoinRoom subscribes to a GossipSub topic for the given room ID
+func (n *Node) JoinRoom(roomID string, isPrivate bool, password string) (*Room, error) {
+	topicName := fmt.Sprintf("animasola/room/%s", roomID)
+	topic, err := n.PubSub.Join(topicName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to join topic: %w", err)
+	}
+
+	sub, err := topic.Subscribe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to subscribe to topic: %w", err)
+	}
+
+	var rKey []byte
+	if isPrivate && password != "" {
+		// Use Argon2id for Key Derivation to protect against offline dictionary attacks
+		// We use a deterministic salt based on the roomID so peers generate the same key
+		salt := sha256.Sum256([]byte(roomID))
+		rKey = argon2.IDKey([]byte(password), salt[:], 1, 64*1024, 4, 32)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r := &Room{
+		ID:        roomID,
+		Topic:     topic,
+		Sub:       sub,
+		ctx:       ctx,
+		cancel:    cancel,
+		IsPrivate: isPrivate,
+		RoomKey:   rKey,
+	}
+
+	return r, nil
+}
+
+// LeaveRoom unsubscribes from the topic
+func (r *Room) LeaveRoom() {
+	r.cancel()
+	r.Sub.Cancel()
+	_ = r.Topic.Close() // #nosec G104 -- Errors on closing a topic during teardown are non-fatal.
+}
+
+// Publish broadcasts a message to all peers in the room
+func (r *Room) Publish(ctx context.Context, msg *sqlite.Message, roomName string, authorUsername string) error {
+	netMsg := NetworkMessage{
+		ID:             msg.ID,
+		RoomID:         msg.RoomID,
+		RoomName:       roomName,
+		AuthorID:       msg.AuthorID,
+		AuthorUsername: authorUsername,
+		Content:        msg.Content,
+		CreatedAt:      msg.CreatedAt.Format(sqlite.SortableTimeFormat),
+	}
+
+	payload, err := json.Marshal(netMsg)
+	if err != nil {
+		logDebug("Publish: failed to marshal message: %v", err)
+		return fmt.Errorf("failed to marshal message: %w", err)
+	}
+
+	if r.IsPrivate && len(r.RoomKey) > 0 {
+		block, err := aes.NewCipher(r.RoomKey)
+		if err != nil {
+			return err
+		}
+		gcm, err := cipher.NewGCM(block)
+		if err != nil {
+			return err
+		}
+		nonce := make([]byte, gcm.NonceSize())
+		if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
+			return err
+		}
+		payload = gcm.Seal(nonce, nonce, payload, nil)
+	}
+
+	logDebug("Publish: broadcasting payload length %d to topic", len(payload))
+	return r.Topic.Publish(ctx, payload)
+}
+
+// Listen blocks and waits for new messages, writing them to the SQLite store
+func (r *Room) Listen(db *sqlite.Store, hostID string, onNewMessage func(sqlite.FeedMessage)) {
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		default:
+			msg, err := r.Sub.Next(r.ctx)
+			if err != nil {
+				// Context canceled or subscription closed
+				return
+			}
+
+			// Don't process our own messages, we already saved them locally when sending
+			if msg.ReceivedFrom.String() == hostID {
+				continue
+			}
+
+			payload := msg.Data
+
+			if r.IsPrivate && len(r.RoomKey) > 0 {
+				block, err := aes.NewCipher(r.RoomKey)
+				if err != nil {
+					fmt.Printf("Warning: failed to create cipher: %s\n", err)
+					continue
+				}
+				gcm, err := cipher.NewGCM(block)
+				if err != nil {
+					fmt.Printf("Warning: failed to create gcm: %s\n", err)
+					continue
+				}
+				nonceSize := gcm.NonceSize()
+				if len(payload) < nonceSize {
+					fmt.Println("Warning: incoming encrypted payload too short")
+					continue
+				}
+				nonce, ciphertext := payload[:nonceSize], payload[nonceSize:]
+				decrypted, err := gcm.Open(nil, nonce, ciphertext, nil)
+				if err != nil {
+					// Wrong password or tampering. Simply drop the message.
+					continue
+				}
+				payload = decrypted
+			}
+
+			logDebug("Listen: processing payload length %d", len(payload))
+
+			var netMsg NetworkMessage
+			if err := json.Unmarshal(payload, &netMsg); err != nil {
+				logDebug("Listen: failed to unmarshal p2p message: %v", err)
+				fmt.Printf("Warning: failed to unmarshal p2p message: %s\n", err)
+				continue
+			}
+
+			logDebug("Listen: unmarshaled message from author %s", netMsg.AuthorID)
+
+			// 1. Cryptographic Envelope Binding (Anti-Forgery)
+			// The outer Libp2p envelope `msg.ReceivedFrom` is mathematically signed by the sender's private key.
+			// The inner JSON `netMsg.AuthorID` is just an untrusted string. We MUST assert they match.
+			if netMsg.AuthorID != msg.ReceivedFrom.String() {
+				fmt.Printf("SECURITY ALERT: Dropping forged payload! Inner Author %s does not match Outer Envelope Signature %s\n", netMsg.AuthorID, msg.ReceivedFrom.String())
+				continue
+			}
+
+			// We need to ensure the author exists in our local DB before inserting the message
+			// Use the provided username if available, else fallback to Guest ID for old clients
+			username := netMsg.AuthorUsername
+			if username == "" {
+				username = "Guest-" + netMsg.AuthorID[:8]
+			}
+			err = db.EnsureRemoteUserExists(r.ctx, netMsg.AuthorID, username)
+			if err != nil {
+				logDebug("Listen: failed to ensure remote user: %v", err)
+				fmt.Printf("Warning: failed to ensure remote user: %s\n", err)
+				continue
+			}
+
+			logDebug("Listen: ensured user %s exists. Syncing message %s", username, netMsg.ID)
+
+			t, err := time.Parse(sqlite.SortableTimeFormat, netMsg.CreatedAt)
+			if err != nil {
+				fmt.Printf("Warning: dropping payload with malformed timestamp: %s\n", err)
+				continue
+			}
+
+			// 2. Time-Jack Validation (Anti-API Pinning)
+			// Calculate delta between the sender's asserted timestamp and our local system clock
+			delta := time.Since(t)
+
+			// Protect against extreme historical replay attacks (older than 24 hours)
+			if delta > 24*time.Hour {
+				fmt.Printf("SECURITY ALERT: Dropping Time-Jack payload! Timestamp %s is >24 hours in the past.\n", netMsg.CreatedAt)
+				continue
+			}
+
+			// Protect against future UI pinning attacks (more than 15 minutes in the future)
+			// Note: `time.Since` returns a negative duration for future timestamps.
+			if delta < -15*time.Minute {
+				fmt.Printf("SECURITY ALERT: Dropping Time-Jack payload! Timestamp %s is >15 minutes in the future.\n", netMsg.CreatedAt)
+				continue
+			}
+
+			// Enforce max chat length to prevent malicious UI freezing
+			contentRunes := []rune(netMsg.Content)
+			if len(contentRunes) > 2000 {
+				netMsg.Content = string(contentRunes[:2000])
+			}
+
+			dbMsg := sqlite.Message{
+				ID:        netMsg.ID,
+				RoomID:    netMsg.RoomID,
+				AuthorID:  netMsg.AuthorID,
+				Content:   netMsg.Content,
+				CreatedAt: t,
+			}
+
+			// If the message brings a RoomName, we should update our local stub room if it's currently generic
+			if netMsg.RoomName != "" && netMsg.RoomName != "Remote Room" {
+				db.UpdateRoomNameIfDefault(r.ctx, netMsg.RoomID, netMsg.RoomName)
+			}
+
+			// Insert into DB. If err is "UNIQUE constraint failed", it means it's our own
+			// echoed message or we already synced it. We can ignore that safely.
+			err = db.SyncMessage(r.ctx, &dbMsg)
+			if err != nil {
+				logDebug("Listen: sync message failed (likely self/duplicate): %v", err)
+			} else {
+				logDebug("Listen: message synced successfully! Triggering UI callback.")
+			}
+
+			// Trigger the UI callback so the Feed updates in real time
+			feedMsg := sqlite.FeedMessage{
+				Message: sqlite.Message{
+					ID:        dbMsg.ID,
+					RoomID:    dbMsg.RoomID,
+					AuthorID:  dbMsg.AuthorID,
+					Content:   dbMsg.Content,
+					CreatedAt: dbMsg.CreatedAt,
+				},
+				RoomName:       netMsg.RoomName,
+				AuthorUsername: username,
+			}
+
+			if onNewMessage != nil {
+				onNewMessage(feedMsg)
+			}
+		}
+	}
+}

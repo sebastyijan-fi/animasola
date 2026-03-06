@@ -1,0 +1,27 @@
+{
+    "name": "animasola",
+    "version": "1.0.0",
+    "description": "Decentralized P2P Chat over Tor",
+    "capabilities": {
+        "identity": {
+            "path": "internal/identity",
+            "description": "Ed25519 cryptographic identity issuance and parsing."
+        },
+        "network": {
+            "path": "internal/network",
+            "description": "Libp2p Host, Kademlia DHT Discovery, and GossipSub topic routers."
+        },
+        "store": {
+            "path": "internal/store",
+            "description": "SQLite Write-Ahead-Log persistence for messages and rooms."
+        },
+        "tor": {
+            "path": "internal/tor",
+            "description": "Autonomous embedded OS-level Tor daemon manager and config generator."
+        },
+        "tui": {
+            "path": "internal/tui",
+            "description": "Bubbletea Terminal User Interface forms and reactive event loop."
+        }
+    }
+}

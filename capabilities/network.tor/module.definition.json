@@ -1,0 +1,4 @@
+{
+  "capability": "network.tor",
+  "description": "Tor daemon process management."
+}

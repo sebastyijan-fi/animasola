@@ -1,93 +1,34 @@
 package main
 
 import (
-	"flag"
+	"context"
 	"fmt"
-	"log"
 	"os"
-	"os/signal"
-	"syscall"
 
-	"animasola/internal/config"
-	"animasola/internal/pubsub"
-	"animasola/internal/server"
-	"animasola/internal/store"
+	tui "github.com/sebastyijan/animasola/capabilities/presentation.tui"
 )
 
 func main() {
-	var configPath string
-	flag.StringVar(&configPath, "config", "", "path to config yaml")
-	flag.Parse()
-
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		log.Fatalf("config: %v", err)
-	}
-
-	if err := os.MkdirAll("./data", 0o755); err != nil {
-		log.Fatalf("mkdir data: %v", err)
-	}
-
-	st, err := store.Open(cfg.DatabasePath)
-	if err != nil {
-		log.Fatalf("db open: %v", err)
-	}
-	defer st.Close()
-
-	if err := st.Migrate("./migrations"); err != nil {
-		log.Fatalf("db migrate: %v", err)
-	}
-
-	broker := pubsub.New[pubsub.Event]()
-
-	mainSrv, err := server.New(cfg, st, broker, server.ModeMain)
-	if err != nil {
-		log.Fatalf("ssh main server: %v", err)
-	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- mainSrv.ListenAndServe()
+	// 0. Ensure Host Terminal Resilience
+	// If the application panics inside the Bubbletea alt-screen, the terminal is left permanently broken
+	// with a hidden cursor and no echo. This defer catches panics and fires the raw VT100 ANSI sequences
+	// to immediately tear down the alt-buffer and re-show the cursor before printing the traceback.
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Print("\033[?1049l\033[?25h")
+			fmt.Printf("\nFatal Error (Panic Recovery): %v\n", r)
+			os.Exit(1)
+		}
 	}()
 
-	log.Printf("ssh main listening on %s:%d", cfg.Host, cfg.Port)
+	ctx := context.Background()
 
-	var regSrv interface {
-		ListenAndServe() error
-		Close() error
+	// Boot the Phase 14 Zero-Argument Root TUI Model
+	// This orchestrates the Consent Disclaimer, Profile generation, and deferred setup.
+	p := tui.Start(ctx)
+
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)
+		os.Exit(1)
 	}
-	if cfg.RegisterPort != 0 && cfg.RegisterPort != cfg.Port {
-		if cfg.RegisterDomain == "" {
-			log.Fatalf("register_domain is required when register_port is enabled")
-		}
-		s, err := server.New(cfg, st, nil, server.ModeRegister)
-		if err != nil {
-			log.Fatalf("ssh register server: %v", err)
-		}
-		regSrv = s
-		go func() {
-			errCh <- s.ListenAndServe()
-		}()
-		log.Printf("ssh register listening on %s:%d", cfg.Host, cfg.RegisterPort)
-	}
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-
-	select {
-	case sig := <-sigCh:
-		log.Printf("signal: %s; shutting down", sig)
-		if err := mainSrv.Close(); err != nil {
-			log.Printf("close: %v", err)
-		}
-		if regSrv != nil {
-			if err := regSrv.Close(); err != nil {
-				log.Printf("close: %v", err)
-			}
-		}
-	case err := <-errCh:
-		log.Fatalf("listen: %v", err)
-	}
-
-	fmt.Println("bye")
 }

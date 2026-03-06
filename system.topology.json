@@ -1,0 +1,13 @@
+{
+    "services": [
+        "animasola-tui-client",
+        "animasola-headless-client",
+        "tor-daemon"
+    ],
+    "databases": [
+        "sqlite-local-storage"
+    ],
+    "queues": [
+        "gossipsub-event-network"
+    ]
+}
