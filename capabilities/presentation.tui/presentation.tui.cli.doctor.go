@@ -3,11 +3,14 @@ package tui
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	version "github.com/sebastyijan/animasola/capabilities/core.version"
+	p2p "github.com/sebastyijan/animasola/capabilities/network.p2p"
 	tor "github.com/sebastyijan/animasola/capabilities/network.tor"
 )
 
@@ -35,12 +38,47 @@ func RunDoctor(ctx context.Context) {
 	appConfigDir := filepath.Join(configRoot, "animasola")
 	fmt.Printf("App config dir: %s\n", appConfigDir)
 
+	hasFailure := false
+
 	torBinary, torErr := tor.EnsureTorBinary(appConfigDir)
 	if torErr != nil {
 		fmt.Printf("Tor: missing (%v)\n", torErr)
 		fmt.Println("Fix: install tor, bundle it with the release, or set ANIMASOLA_TOR_BIN")
+		hasFailure = true
 	} else {
 		fmt.Printf("Tor: ok (%s)\n", torBinary)
+	}
+
+	allProxy := strings.TrimSpace(os.Getenv("ALL_PROXY"))
+	if allProxy == "" {
+		fmt.Println("Tor SOCKS proxy: missing (set ALL_PROXY to the local Tor SOCKS endpoint, for example socks5://127.0.0.1:45000)")
+		hasFailure = true
+	} else if proxyURL, err := url.Parse(allProxy); err != nil || proxyURL.Scheme == "" || proxyURL.Host == "" {
+		fmt.Printf("Tor SOCKS proxy: invalid (%s)\n", allProxy)
+		hasFailure = true
+	} else if proxyURL.Scheme != "socks5" && proxyURL.Scheme != "socks5h" {
+		fmt.Printf("Tor SOCKS proxy: invalid scheme (%s)\n", proxyURL.Scheme)
+		hasFailure = true
+	} else {
+		fmt.Printf("Tor SOCKS proxy: ok (%s)\n", allProxy)
+	}
+
+	rawBootstrap := strings.TrimSpace(os.Getenv("ANIMASOLA_BOOTSTRAP_PEERS"))
+	bootstrapSource := p2p.BootstrapPeerSource(rawBootstrap)
+	bootstrapCount := 0
+	switch {
+	case bootstrapSource == "missing":
+		fmt.Println("Bootstrap peers: missing (release bootstrap peers have not been embedded and ANIMASOLA_BOOTSTRAP_PEERS is unset)")
+		hasFailure = true
+	default:
+		peers, err := p2p.ParseBootstrapPeerInfos(p2p.ResolveBootstrapPeers(rawBootstrap), false)
+		if err != nil {
+			fmt.Printf("Bootstrap peers: invalid (%v)\n", err)
+			hasFailure = true
+		} else {
+			bootstrapCount = len(peers)
+			fmt.Printf("Bootstrap peers: ok (%d onion peer(s), source=%s)\n", bootstrapCount, bootstrapSource)
+		}
 	}
 
 	profiles := 0
@@ -56,8 +94,13 @@ func RunDoctor(ctx context.Context) {
 	if envTor := os.Getenv("ANIMASOLA_TOR_BIN"); envTor != "" {
 		fmt.Printf("ANIMASOLA_TOR_BIN: %s\n", envTor)
 	}
-	if envProxy := os.Getenv("ALL_PROXY"); envProxy != "" {
-		fmt.Printf("ALL_PROXY: %s\n", envProxy)
+	if allProxy != "" {
+		fmt.Printf("ALL_PROXY: %s\n", allProxy)
+	}
+	if envBootstrap := os.Getenv("ANIMASOLA_BOOTSTRAP_PEERS"); envBootstrap != "" {
+		fmt.Printf("ANIMASOLA_BOOTSTRAP_PEERS: %s\n", envBootstrap)
+	} else if bootstrapSource == "embedded" {
+		fmt.Println("ANIMASOLA_BOOTSTRAP_PEERS: using embedded release bootstrap list")
 	}
 	if envConfig := os.Getenv("XDG_CONFIG_HOME"); envConfig != "" {
 		fmt.Printf("XDG_CONFIG_HOME: %s\n", envConfig)
@@ -65,7 +108,7 @@ func RunDoctor(ctx context.Context) {
 
 	fmt.Printf("Key storage: %s/<profile>/id_ed25519\n", filepath.Join(configRoot, "animasola"))
 
-	if torErr != nil {
+	if hasFailure {
 		os.Exit(1)
 	}
 }

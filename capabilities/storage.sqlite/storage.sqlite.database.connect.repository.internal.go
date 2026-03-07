@@ -121,11 +121,15 @@ func (s *Store) resetDatabase(ctx context.Context) error {
 	}
 
 	backupPath := fmt.Sprintf("%s.reset-%s.bak", s.dbPath, time.Now().UTC().Format("20060102T150405"))
-	if err := os.Rename(s.dbPath, backupPath); err != nil && !os.IsNotExist(err) {
+	if err := archiveSQLiteArtifact(s.dbPath, backupPath); err != nil {
 		return err
 	}
-	_ = os.Remove(s.dbPath + "-wal")
-	_ = os.Remove(s.dbPath + "-shm")
+	if err := archiveSQLiteArtifact(s.dbPath+"-wal", backupPath+"-wal"); err != nil {
+		return err
+	}
+	if err := archiveSQLiteArtifact(s.dbPath+"-shm", backupPath+"-shm"); err != nil {
+		return err
+	}
 
 	db, err := openSQLiteDB(s.dbPath)
 	if err != nil {
@@ -137,6 +141,13 @@ func (s *Store) resetDatabase(ctx context.Context) error {
 	s.cancel = cancel
 	s.syncQueue = make(chan syncJob, 10000)
 	go s.processSyncQueue()
+	return nil
+}
+
+func archiveSQLiteArtifact(srcPath, dstPath string) error {
+	if err := os.Rename(srcPath, dstPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	return nil
 }
 

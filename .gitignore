@@ -1,9 +1,37 @@
-bin/
-animasola
-main
-*.db
-*.log
+# OS/editor noise
 .DS_Store
+.idea/
+.vscode/
+
+# Go build and test outputs
+bin/
+*.test
+*.out
+coverage.out
+*.prof
+
+# Local binaries commonly produced at repo root
+/animasola
+/main
+/headless
+/telemetry
+/p2p-debug
+/bootstrap-node
+*.exe
+
+# Generated release artifacts
+/releases/
 *.AppImage
 *.zip
 *.tar.gz
+
+# Local runtime data
+*.db
+*.db-wal
+*.db-shm
+*.log
+/logs/
+
+# Environment files
+.env
+.env.*

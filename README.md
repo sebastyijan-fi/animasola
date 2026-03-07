@@ -6,16 +6,18 @@ A terminal sanctuary for developers. No signup, no web app, no central servers. 
 
 ## 🚀 How to Get Started (For Beginners)
 
-Animasola runs entirely inside your Terminal. It includes Tor internally for private routing, so you do not need to install or configure Tor yourself. Download one release bundle, install it, and run `animasola`.
+Animasola runs entirely inside your Terminal. Tor is included for private routing, so you do not need to install or configure Tor yourself. Download one release bundle, install it, and run `animasola`.
 
 Here is exactly how to get it running on your Mac or Linux computer.
 
 ### Step 1: Download the App
 1. Go to the [Releases](https://github.com/sebastyijan-fi/animasola/releases) page on our GitHub.
-2. Under "Assets", click to download the bundle that matches your computer:
+2. Under "Assets", download the `.tar.gz` bundle that matches your computer. These bundles are the main release files for normal users:
    * **Mac users (M1/M2/M3 chips):** Download `animasola-darwin-arm64.tar.gz`
    * **Mac users (Older Intel chips):** Download `animasola-darwin-amd64.tar.gz`
    * **Linux users:** Download `animasola-linux-amd64.tar.gz`
+
+If you notice any extra files in a release, you can ignore them unless the release notes specifically tell you otherwise. For normal installs, always choose the `.tar.gz` bundle.
 
 ### Step 2: Unpack the Bundle
 1. Open your **Terminal** app.
@@ -73,6 +75,8 @@ sudo animasola update
 ```
 *(This command downloads the latest release and swaps your executable file atomically.)*
 
+If you installed Animasola from one of the normal release bundles, this is the upgrade path you should keep using. If you tried very early alpha builds, Animasola may need to replace older install layouts with the newer bundled layout during upgrade. That is expected while the release line settles down.
+
 ### Step 7: Diagnose Problems
 If startup fails, run:
 ```bash
@@ -80,13 +84,15 @@ animasola doctor
 ```
 This prints your version, config directory, profile count, and whether Animasola can find its bundled Tor runtime.
 
+If you are coming from a much older alpha build, Animasola may decide that your old local database is not compatible anymore. In that case, it will archive/reset the old database instead of crashing. That keeps the app usable, but it can mean old local chat history does not carry forward from broken alpha-era data.
+
 ---
 
 ## 🔐 What Happens When I Open It?
 
 Because Animasola is built for privacy, it works a little differently than normal apps like Discord or Slack.
 
-1. **The Warning Screen:** The first time you open it, Animasola will explain that it uses Tor internally for private routing and ask for your consent before starting the private network runtime.
+1. **The Warning Screen:** The first time you open it, Animasola will explain that Tor is included for private routing and ask for your consent before starting the private network runtime.
 2. **Who Are You?:** Next, it will ask you to create a Profile. Type any name you want (like "MyLaptop"). 
 3. **The Magic:** When you hit Enter, the app generates a highly complex mathematical "Cryptographic Key" for you. **This is your permanent identity.** There are no emails, no passwords, and no servers. You are the only person in the universe who owns this mathematical key.
 4. **Bootstrapping:** You will see a loading screen while Animasola starts its private network connection. This usually takes around 15 seconds.

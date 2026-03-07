@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	network "github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
+	transport "github.com/libp2p/go-libp2p/core/transport"
 	"github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	"github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
@@ -24,11 +25,13 @@ import (
 	telemetry "github.com/sebastyijan/animasola/capabilities/network.telemetry"
 )
 
-var DefaultBootstrapPeers = []string{
-	"/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
-	"/dnsaddr/bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa",
-	"/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
-	"/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt",
+type Config struct {
+	Identity            *keys.Keys
+	OnionAddress        string
+	ListenPort          int
+	SocksProxy          string
+	BootstrapPeers      []string
+	AllowEmptyBootstrap bool
 }
 
 type Node struct {
@@ -56,19 +59,40 @@ type NodeStatus struct {
 
 // NewNode initializes a libp2p host using the provided isolated Identity Key,
 // and strictly advertises its Tor Onion v3 routing address to the DHT.
-func NewNode(keys *keys.Keys, onionURL string, listenPort int) (*Node, error) {
+func NewNode(cfg Config) (*Node, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	relayPeers := parseBootstrapPeerInfos(DefaultBootstrapPeers)
+	if cfg.Identity == nil {
+		cancel()
+		return nil, fmt.Errorf("missing p2p identity")
+	}
+	if strings.TrimSpace(cfg.OnionAddress) == "" {
+		cancel()
+		return nil, fmt.Errorf("missing onion address")
+	}
+	if cfg.ListenPort <= 0 {
+		cancel()
+		return nil, fmt.Errorf("invalid listen port: %d", cfg.ListenPort)
+	}
+	if strings.TrimSpace(cfg.SocksProxy) == "" {
+		cancel()
+		return nil, fmt.Errorf("missing Tor SOCKS proxy for outbound onion dialing")
+	}
+
+	bootstrapPeers, err := ParseBootstrapPeerInfos(cfg.BootstrapPeers, cfg.AllowEmptyBootstrap)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
 
 	// Convert standard crypto/ed25519 to libp2p crypto
-	p2pPrivKey, err := crypto.UnmarshalEd25519PrivateKey(keys.PrivateKey)
+	p2pPrivKey, err := crypto.UnmarshalEd25519PrivateKey(cfg.Identity.PrivateKey)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to convert identity key to libp2p key: %w", err)
 	}
 
 	// Tell libp2p to advertise the Tor Hidden Service onion address so global peers can find us
-	onionMultiaddr := fmt.Sprintf("/onion3/%s:%d", onionURL, listenPort)
+	onionMultiaddr := fmt.Sprintf("/onion3/%s:%d", cfg.OnionAddress, cfg.ListenPort)
 	advertiseAddr, err := multiaddr.NewMultiaddr(onionMultiaddr)
 	if err != nil {
 		cancel()
@@ -91,16 +115,18 @@ func NewNode(keys *keys.Keys, onionURL string, listenPort int) (*Node, error) {
 	// and ONLY tells the world its .onion address.
 	h, err := libp2p.New(
 		libp2p.Identity(p2pPrivKey),
-		libp2p.NoTransports,                   // Disable all default transports (including QUIC)
-		libp2p.Transport(tcp.NewTCPTransport), // Explicitly only enable TCP for Tor routing
-		libp2p.ListenAddrStrings(fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", listenPort)), // Bind specifically to what torrc expects
+		libp2p.NoTransports,                     // Disable all default transports (including QUIC)
+		libp2p.Transport(tcp.NewTCPTransport),   // Local loopback listener for the Tor hidden-service forward
+		libp2p.Transport(func(upgrader transport.Upgrader, rcmgr network.ResourceManager) (transport.Transport, error) {
+			return NewTorOnionTransport(upgrader, rcmgr, cfg.SocksProxy)
+		}),
+		libp2p.ListenAddrStrings(fmt.Sprintf("/ip4/127.0.0.1/tcp/%d", cfg.ListenPort)), // Bind specifically to what torrc expects
 		libp2p.AddrsFactory(func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 			// Strip all local IP leakage and only present the Tor endpoint
 			return []multiaddr.Multiaddr{advertiseAddr}
 		}),
 		libp2p.ConnectionManager(cm),
 		libp2p.ForceReachabilityPrivate(),
-		libp2p.EnableAutoRelayWithStaticRelays(relayPeers),
 	)
 	if err != nil {
 		cancel()
@@ -144,24 +170,20 @@ func NewNode(keys *keys.Keys, onionURL string, listenPort int) (*Node, error) {
 		Host:      h,
 		PubSub:    ps,
 		Telemetry: telSvc,
-		Identity:  keys,
+		Identity:  cfg.Identity,
 		ctx:       ctx,
 		cancel:    cancel,
 		status: NodeStatus{
 			StartedAt:             time.Now().UTC(),
-			AutoRelayEnabled:      len(relayPeers) > 0,
-			StaticRelayCandidates: len(relayPeers),
+			BootstrapPeerCount:    len(bootstrapPeers),
+			AutoRelayEnabled:      false,
+			StaticRelayCandidates: 0,
 		},
 	}
 	h.Network().Notify(&nodeNetworkNotifiee{node: n})
 
-	// Setup mDNS discovery to find local peers automatically
-	if err := n.setupDiscovery(); err != nil {
-		// mDNS failure shouldn't kill the node
-		fmt.Printf("Warning: failed to setup mDNS: %s\n", err)
-	}
-	go n.maintainBootstrapConnections()
-	go n.waitForBootstrapPeer(ctx)
+	go n.maintainBootstrapConnections(bootstrapPeers)
+	go n.waitForBootstrapPeer(ctx, bootstrapPeers)
 
 	return n, nil
 }
@@ -170,31 +192,6 @@ func NewNode(keys *keys.Keys, onionURL string, listenPort int) (*Node, error) {
 func (n *Node) Close() error {
 	n.cancel()
 	return n.Host.Close()
-}
-
-// ----- Local Peer Discovery (mDNS) -----
-
-type discoveryNotifee struct {
-	h host.Host
-}
-
-func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
-	// Automatically connect to local peers found via mDNS
-	if pi.ID == n.h.ID() {
-		return // Ignore self
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
-	defer cancel()
-
-	err := n.h.Connect(ctx, pi)
-	if err == nil {
-		// Connected
-	}
-}
-
-func (n *Node) setupDiscovery() error {
-	ser := mdns.NewMdnsService(n.Host, "animasola-alpha", &discoveryNotifee{h: n.Host})
-	return ser.Start()
 }
 
 func (n *Node) Context() context.Context {
@@ -225,18 +222,10 @@ func (n *Node) Status() NodeStatus {
 	return n.status
 }
 
-func (n *Node) waitForBootstrapPeer(ctx context.Context) bool {
+func (n *Node) waitForBootstrapPeer(ctx context.Context, bootstrapPeers []peer.AddrInfo) bool {
 	results := make(chan struct{}, 1)
 
-	for _, peerAddr := range DefaultBootstrapPeers {
-		addr, err := multiaddr.NewMultiaddr(peerAddr)
-		if err != nil {
-			continue
-		}
-		peerInfo, err := peer.AddrInfoFromP2pAddr(addr)
-		if err != nil {
-			continue
-		}
+	for _, peerInfo := range bootstrapPeers {
 		n.setLastBootstrapAttempt()
 		go func(pi peer.AddrInfo) {
 			dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -248,7 +237,7 @@ func (n *Node) waitForBootstrapPeer(ctx context.Context) bool {
 				default:
 				}
 			}
-		}(*peerInfo)
+		}(peerInfo)
 	}
 
 	select {
@@ -260,7 +249,7 @@ func (n *Node) waitForBootstrapPeer(ctx context.Context) bool {
 	return false
 }
 
-func (n *Node) maintainBootstrapConnections() {
+func (n *Node) maintainBootstrapConnections(bootstrapPeers []peer.AddrInfo) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -269,7 +258,7 @@ func (n *Node) maintainBootstrapConnections() {
 		case <-n.ctx.Done():
 			return
 		case <-ticker.C:
-			n.waitForBootstrapPeer(n.ctx)
+			n.waitForBootstrapPeer(n.ctx, bootstrapPeers)
 		}
 	}
 }
@@ -324,6 +313,46 @@ func parseBootstrapPeerInfos(addrs []string) []peer.AddrInfo {
 		peers = append(peers, *info)
 	}
 	return peers
+}
+
+func SplitBootstrapPeers(raw string) []string {
+	lines := strings.Split(raw, "\n")
+	addrs := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		for _, field := range strings.Split(line, ",") {
+			addr := strings.TrimSpace(field)
+			if addr == "" || strings.HasPrefix(addr, "#") {
+				continue
+			}
+			addrs = append(addrs, addr)
+		}
+	}
+	return addrs
+}
+
+func ParseBootstrapPeerInfos(addrs []string, allowEmpty bool) ([]peer.AddrInfo, error) {
+	if len(addrs) == 0 {
+		if allowEmpty {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("tor-only networking requires at least one /onion3/.../p2p/... bootstrap peer")
+	}
+
+	for _, addr := range addrs {
+		if !strings.HasPrefix(addr, "/onion3/") {
+			return nil, fmt.Errorf("bootstrap peer %q is not onion-only; bootstrap peers must contain only /onion3/.../p2p/... addresses", addr)
+		}
+	}
+
+	peers := parseBootstrapPeerInfos(addrs)
+	if len(peers) != len(addrs) {
+		return nil, fmt.Errorf("failed to parse one or more onion bootstrap peers")
+	}
+	return peers, nil
 }
 
 type nodeNetworkNotifiee struct {

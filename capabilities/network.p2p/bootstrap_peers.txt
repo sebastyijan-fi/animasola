@@ -1,0 +1,6 @@
+# Release bootstrap peers.
+# Populate this file with one /onion3/.../p2p/... address per line before cutting
+# a user-facing Tor-only release.
+#
+# Example:
+# /onion3/<56-char-onion>:4001/p2p/<peer-id>

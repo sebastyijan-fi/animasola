@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -146,7 +147,13 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// 2. Initialize the P2P Network Node dynamically
-		node, err := p2p.NewNode(m.keys, onionAddr, m.torConfig.HiddenServicePort)
+		node, err := p2p.NewNode(p2p.Config{
+			Identity:       m.keys,
+			OnionAddress:   onionAddr,
+			ListenPort:     m.torConfig.HiddenServicePort,
+			SocksProxy:     fmt.Sprintf("socks5://127.0.0.1:%d", m.torConfig.SocksPort),
+			BootstrapPeers: p2p.ResolveBootstrapPeers(os.Getenv("ANIMASOLA_BOOTSTRAP_PEERS")),
+		})
 		if err != nil {
 			return m, func() tea.Msg { return TorErrorMsg(fmt.Errorf("error starting p2p node: %w", err)) }
 		}

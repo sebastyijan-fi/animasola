@@ -93,7 +93,13 @@ func main() {
 	}
 
 	// 4. Kademlia Libp2p Network Integration
-	node, err := p2p.NewNode(identityKeys, onionAddress, listenPort)
+	node, err := p2p.NewNode(p2p.Config{
+		Identity:       identityKeys,
+		OnionAddress:   onionAddress,
+		ListenPort:     listenPort,
+		SocksProxy:     socksAddr,
+		BootstrapPeers: p2p.ResolveBootstrapPeers(os.Getenv("ANIMASOLA_BOOTSTRAP_PEERS")),
+	})
 	if err != nil {
 		log.Fatalf("Failed to create libp2p node: %v", err)
 	}

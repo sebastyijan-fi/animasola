@@ -197,3 +197,60 @@ func TestMigrateLegacyRoomsSchemaBeforeLastSeenAt(t *testing.T) {
 		t.Fatalf("expected legacy room to survive migration, got %q", room.Name)
 	}
 }
+
+func TestResetOnIncompatibleSchemaCreatesCleanDatabase(t *testing.T) {
+	configDir := t.TempDir()
+	dbPath := filepath.Join(configDir, "broken.db")
+
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("open incompatible sqlite: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.Exec(`
+		CREATE TABLE rooms (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL
+		);
+		INSERT INTO rooms (id, name) VALUES ('room1', 'legacy-room');
+	`); err != nil {
+		t.Fatalf("seed incompatible schema: %v", err)
+	}
+
+	store, err := sqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen broken store: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate incompatible schema: %v", err)
+	}
+
+	if _, err := store.GetRoom(context.Background(), "room1"); err == nil {
+		t.Fatalf("expected incompatible legacy room data to be absent from the live database")
+	}
+
+	liveDB, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("open migrated sqlite: %v", err)
+	}
+	defer liveDB.Close()
+
+	var roomCount int
+	if err := liveDB.QueryRow(`SELECT COUNT(*) FROM rooms`).Scan(&roomCount); err != nil {
+		t.Fatalf("count rooms in live database: %v", err)
+	}
+	if roomCount != 0 {
+		t.Fatalf("expected clean live database after reset, found %d room(s)", roomCount)
+	}
+
+	backups, err := filepath.Glob(dbPath + ".reset-*.bak")
+	if err != nil {
+		t.Fatalf("glob reset backups: %v", err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("expected exactly one archived incompatible database, found %d", len(backups))
+	}
+}

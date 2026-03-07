@@ -119,7 +119,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	node, err := p2p.NewNode(keys, onionAddress, listenPort)
+	node, err := p2p.NewNode(p2p.Config{
+		Identity:       keys,
+		OnionAddress:   onionAddress,
+		ListenPort:     listenPort,
+		SocksProxy:     socksAddr,
+		BootstrapPeers: p2p.ResolveBootstrapPeers(os.Getenv("ANIMASOLA_BOOTSTRAP_PEERS")),
+	})
 	if err != nil {
 		fmt.Printf("Failed to create libp2p node: %v\n", err)
 		os.Exit(1)

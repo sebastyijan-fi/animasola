@@ -18,7 +18,13 @@ func main() {
 	snipaDB, _ := sqlite.Open("/tmp/snipa_test.db")
 	snipaDB.Migrate(context.Background())
 	snipaKeys, _ := keys.GetOrGenerateKey("snipa")
-	snipaNode, err := p2p.NewNode(snipaKeys, "snipajkl3456789123456789123456789123456789123456789", 4001)
+	snipaNode, err := p2p.NewNode(p2p.Config{
+		Identity:            snipaKeys,
+		OnionAddress:        "snipajkl3456789123456789123456789123456789123456789",
+		ListenPort:          4001,
+		SocksProxy:          "socks5://127.0.0.1:9050",
+		AllowEmptyBootstrap: true,
+	})
 	if err != nil {
 		log.Fatal("Snipa Node Error:", err)
 	}
@@ -36,7 +42,13 @@ func main() {
 	bobDB, _ := sqlite.Open("/tmp/bob_test.db")
 	bobDB.Migrate(context.Background())
 	bobKeys, _ := keys.GetOrGenerateKey("bob")
-	bobNode, err := p2p.NewNode(bobKeys, "bobjkl3456789123456789123456789123456789123456789", 4002)
+	bobNode, err := p2p.NewNode(p2p.Config{
+		Identity:            bobKeys,
+		OnionAddress:        "bobjkl3456789123456789123456789123456789123456789",
+		ListenPort:          4002,
+		SocksProxy:          "socks5://127.0.0.1:9050",
+		AllowEmptyBootstrap: true,
+	})
 	if err != nil {
 		log.Fatal("Bob Node Error:", err)
 	}
