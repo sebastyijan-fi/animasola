@@ -84,6 +84,14 @@ type publicRoomReleaseRequest struct {
 	Signature string `json:"signature"`
 }
 
+type publicRoomSearchResult struct {
+	RoomID    string `json:"room_id"`
+	PeerID    string `json:"peer_id"`
+	Username  string `json:"username"`
+	Name      string `json:"name"`
+	CreatedAt string `json:"created_at"`
+}
+
 type issuedChallenge struct {
 	PeerID string
 	Action string
@@ -169,6 +177,7 @@ func main() {
 	mux.HandleFunc("/v1/profiles/validate", srv.handleValidateProfile)
 	mux.HandleFunc("/v1/profiles/release", srv.handleReleaseProfile)
 	mux.HandleFunc("/v1/public-rooms/register", srv.handleRegisterPublicRoom)
+	mux.HandleFunc("/v1/public-rooms/search", srv.handleSearchPublicRooms)
 	mux.HandleFunc("/v1/public-rooms/validate", srv.handleValidatePublicRoom)
 	mux.HandleFunc("/v1/public-rooms/release", srv.handleReleasePublicRoom)
 
@@ -545,6 +554,48 @@ func (s *server) handleValidatePublicRoom(w http.ResponseWriter, r *http.Request
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"allowed": true,
 	})
+}
+
+func (s *server) handleSearchPublicRooms(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+
+	query := strings.TrimSpace(r.URL.Query().Get("query"))
+	if query == "" {
+		_ = json.NewEncoder(w).Encode([]publicRoomSearchResult{})
+		return
+	}
+
+	rows, err := s.db.QueryContext(r.Context(), `
+		SELECT room_id, peer_id, username, name, created_at
+		FROM public_rooms
+		WHERE lower(name) LIKE lower(?)
+		ORDER BY created_at DESC, name ASC
+		LIMIT 20
+	`, "%"+query+"%")
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal_error", "failed to search public rooms")
+		return
+	}
+	defer rows.Close()
+
+	results := make([]publicRoomSearchResult, 0, 20)
+	for rows.Next() {
+		var result publicRoomSearchResult
+		if err := rows.Scan(&result.RoomID, &result.PeerID, &result.Username, &result.Name, &result.CreatedAt); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "internal_error", "failed to search public rooms")
+			return
+		}
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal_error", "failed to search public rooms")
+		return
+	}
+
+	_ = json.NewEncoder(w).Encode(results)
 }
 
 func (s *server) handleReleasePublicRoom(w http.ResponseWriter, r *http.Request) {

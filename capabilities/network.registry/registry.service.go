@@ -80,6 +80,14 @@ type publicRoomReleaseRequest struct {
 	Signature string `json:"signature"`
 }
 
+type PublicRoom struct {
+	RoomID    string `json:"room_id"`
+	PeerID    string `json:"peer_id"`
+	Username  string `json:"username"`
+	Name      string `json:"name"`
+	CreatedAt string `json:"created_at"`
+}
+
 func NewClient() *Client {
 	baseURL := strings.TrimSpace(os.Getenv("ANIMASOLA_REGISTRY_URL"))
 	if baseURL == "" {
@@ -222,6 +230,31 @@ func (c *Client) ValidateProfile(ctx context.Context, username, peerID string) (
 	default:
 		return false, decodeAPIError(resp, nil)
 	}
+}
+
+func (c *Client) SearchPublicRooms(ctx context.Context, query string) ([]PublicRoom, error) {
+	values := url.Values{}
+	values.Set("query", strings.TrimSpace(query))
+	endpoint := c.baseURL + "/v1/public-rooms/search?" + values.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRegistryUnavailable, err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRegistryUnavailable, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, decodeAPIError(resp, nil)
+	}
+
+	var rooms []PublicRoom
+	if err := json.NewDecoder(resp.Body).Decode(&rooms); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRegistryUnavailable, err)
+	}
+	return rooms, nil
 }
 
 func (c *Client) postJSON(ctx context.Context, method, path string, payload any, mapErr func(apiError) error) error {

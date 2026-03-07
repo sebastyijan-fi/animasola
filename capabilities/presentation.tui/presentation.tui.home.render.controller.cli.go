@@ -215,8 +215,29 @@ func (m *HomeModel) FetchRooms() tea.Cmd {
 					_ = m.disco.RequestSnapshot(reqCtx)
 				}()
 			}
-			// Search fetches all public rooms and we filter locally
-			rooms, err = m.sqlite.SearchAllRooms(context.Background())
+			query := strings.TrimSpace(m.searchInput.Value())
+			if query == "" {
+				return RoomsLoadedMsg(nil)
+			}
+			if m.registry != nil {
+				registryRooms, registryErr := m.registry.SearchPublicRooms(context.Background(), query)
+				if registryErr == nil {
+					rooms = make([]sqlite.Room, 0, len(registryRooms))
+					for _, room := range registryRooms {
+						rooms = append(rooms, sqlite.Room{
+							ID:        room.RoomID,
+							Name:      room.Name,
+							CreatorID: room.PeerID,
+							IsPrivate: false,
+						})
+					}
+					return RoomsLoadedMsg(rooms)
+				}
+				err = registryErr
+			}
+			if err == nil {
+				rooms, err = m.sqlite.SearchAllRooms(context.Background())
+			}
 		} else {
 			rooms, err = m.sqlite.ListRooms(context.Background(), m.user.ID)
 		}
@@ -562,8 +583,11 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// If the query changed, reset the cursor to the top of the suggestions!
 				if query != oldQuery {
 					m.index = 0
+					cmds = append(cmds, m.FetchRooms())
 				}
-				m.rooms = filterSearchVisiblePublicRooms(m.allPublicRooms, query)
+				if m.registry == nil {
+					m.rooms = filterSearchVisiblePublicRooms(m.allPublicRooms, query)
+				}
 				if m.index >= len(m.rooms) {
 					m.index = max(0, len(m.rooms)-1)
 				}
