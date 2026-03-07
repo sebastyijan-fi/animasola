@@ -66,6 +66,14 @@ func RunAutoUpdater(ctx context.Context) {
 		os.Exit(1)
 	}
 	bundleAssetName := assetName + ".tar.gz"
+	checksumsAssetName := "checksums.txt"
+	signatureAssetName := "checksums.txt.sig"
+
+	if !httpcap.ReleaseVerificationConfigured() {
+		fmt.Println("❌ Verified updates are not configured in this build.")
+		fmt.Println("   Refusing to install an unverified release payload.")
+		os.Exit(1)
+	}
 
 	fmt.Printf("✅ Pre-flight checks passed! Target platform: %s\n", assetName)
 	fmt.Println("\n🌐 Querying latest version...")
@@ -81,7 +89,9 @@ func RunAutoUpdater(ctx context.Context) {
 		os.Exit(0)
 	}
 
-	downloadURL := fmt.Sprintf("https://github.com/sebastyijan-fi/animasola/releases/download/%s/%s", release.TagName, bundleAssetName)
+	downloadURL := httpcap.ReleaseAssetURL(release.TagName, bundleAssetName)
+	checksumsURL := httpcap.ReleaseAssetURL(release.TagName, checksumsAssetName)
+	signatureURL := httpcap.ReleaseAssetURL(release.TagName, signatureAssetName)
 	fmt.Printf("📦 Downloading encrypted payload: %s\n", release.TagName)
 
 	tmpDir, err := os.MkdirTemp("", "animasola-updater-*")
@@ -95,6 +105,23 @@ func RunAutoUpdater(ctx context.Context) {
 	err = httpcap.DownloadReleaseAsset(downloadURL, tmpDownloadedBundle)
 	if err != nil {
 		fmt.Printf("❌ Downloading binary failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	tmpChecksums := filepath.Join(tmpDir, checksumsAssetName)
+	if err := httpcap.DownloadReleaseAsset(checksumsURL, tmpChecksums); err != nil {
+		fmt.Printf("❌ Downloading release manifest failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	tmpSignature := filepath.Join(tmpDir, signatureAssetName)
+	if err := httpcap.DownloadReleaseAsset(signatureURL, tmpSignature); err != nil {
+		fmt.Printf("❌ Downloading release signature failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := httpcap.VerifyReleaseBundle(tmpDownloadedBundle, tmpChecksums, tmpSignature); err != nil {
+		fmt.Printf("❌ Release verification failed: %v\n", err)
 		os.Exit(1)
 	}
 

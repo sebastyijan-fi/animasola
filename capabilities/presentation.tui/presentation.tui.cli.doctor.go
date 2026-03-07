@@ -51,8 +51,7 @@ func RunDoctor(ctx context.Context) {
 
 	allProxy := strings.TrimSpace(os.Getenv("ALL_PROXY"))
 	if allProxy == "" {
-		fmt.Println("Tor SOCKS proxy: missing (set ALL_PROXY to the local Tor SOCKS endpoint, for example socks5://127.0.0.1:45000)")
-		hasFailure = true
+		fmt.Println("Tor SOCKS proxy: not active yet (normal before Animasola starts Tor)")
 	} else if proxyURL, err := url.Parse(allProxy); err != nil || proxyURL.Scheme == "" || proxyURL.Host == "" {
 		fmt.Printf("Tor SOCKS proxy: invalid (%s)\n", allProxy)
 		hasFailure = true

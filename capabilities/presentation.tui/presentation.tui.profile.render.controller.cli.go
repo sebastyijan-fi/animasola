@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +11,9 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	keys "github.com/sebastyijan/animasola/capabilities/identity.keys"
+	registry "github.com/sebastyijan/animasola/capabilities/network.registry"
 )
 
 type ProfileSelectedMsg struct {
@@ -25,6 +30,7 @@ type ProfileModel struct {
 	creatingNew      bool
 	confirmingDelete bool
 	nameInput        textinput.Model
+	errText          string
 }
 
 func NewProfileModel() *ProfileModel {
@@ -95,11 +101,13 @@ func (m *ProfileModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				name = strings.ReplaceAll(name, "\\", "")
 				name = strings.ReplaceAll(name, ".", "")
 				if name != "" {
+					m.errText = ""
 					return m, func() tea.Msg { return ProfileSelectedMsg{Username: name} }
 				}
 			case "ctrl+c":
 				return m, tea.Quit
 			default:
+				m.errText = ""
 				var cmd tea.Cmd
 				m.nameInput, cmd = m.nameInput.Update(msg)
 				cmds = append(cmds, cmd)
@@ -108,13 +116,28 @@ func (m *ProfileModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "y", "Y":
 				if len(m.profiles) > 0 && m.index < len(m.profiles) {
+					username := m.profiles[m.index]
+					identity, err := keys.LoadKey(username)
+					if err == nil {
+						peerID, err := identity.PeerID()
+						if err == nil {
+							err = registry.NewClient().ReleaseProfile(context.Background(), identity, username, peerID)
+						}
+					}
+					if err != nil && !errors.Is(err, registry.ErrProfileNotRegistered) {
+						m.confirmingDelete = false
+						m.errText = err.Error()
+						return m, nil
+					}
+
 					configRoot, err := os.UserConfigDir()
 					if err == nil {
-						targetProfile := filepath.Join(configRoot, "animasola", m.profiles[m.index])
+						targetProfile := filepath.Join(configRoot, "animasola", username)
 						_ = os.RemoveAll(targetProfile)
 					}
 					m.index = 0
 					m.confirmingDelete = false
+					m.errText = ""
 					m.loadProfiles()
 				}
 			case "n", "N", "esc":
@@ -157,12 +180,16 @@ func (m *ProfileModel) View() string {
 	styleHeader := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).MarginBottom(2)
 	styleSelected := lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
 	styleNormal := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	styleError := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
 
 	s.WriteString(styleHeader.Render("🔮 Select Cryptographic Identity"))
 	s.WriteString("\n\n")
 
 	if m.creatingNew {
 		s.WriteString("Create New Profile:\n\n")
+		if m.errText != "" {
+			s.WriteString(styleError.Render(m.errText) + "\n\n")
+		}
 		s.WriteString(m.nameInput.View() + "\n\n")
 		s.WriteString(styleNormal.Render("(enter to submit, esc to cancel)"))
 	} else if m.confirmingDelete {
@@ -177,6 +204,9 @@ func (m *ProfileModel) View() string {
 		warningStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
 		s.WriteString(warningStyle.Render(fmt.Sprintf("Delete profile '%s'?\nAll keys and history will be permanently lost. (y/n)", m.profiles[m.index])))
 	} else {
+		if m.errText != "" {
+			s.WriteString(styleError.Render(m.errText) + "\n\n")
+		}
 		for i, p := range m.profiles {
 			cursor := " "
 			style := styleNormal
@@ -191,4 +221,13 @@ func (m *ProfileModel) View() string {
 	}
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, s.String())
+}
+
+func (m *ProfileModel) SetError(err error) {
+	if err == nil {
+		m.errText = ""
+		return
+	}
+	m.creatingNew = true
+	m.errText = err.Error()
 }

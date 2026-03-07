@@ -60,8 +60,8 @@ func TestDiscoveryPropagatesNewestPublicRoomMetadata(t *testing.T) {
 	defer storeB.Close()
 	_ = userB
 
-	serviceA := discovery.NewService(nodeA, storeA, userA)
-	serviceB := discovery.NewService(nodeB, storeB, userB)
+	serviceA := discovery.NewService(nodeA, storeA, userA, nil)
+	serviceB := discovery.NewService(nodeB, storeB, userB, nil)
 	if err := serviceA.Start(make(chan sqlite.Room, 8)); err != nil {
 		t.Fatalf("start discovery A: %v", err)
 	}

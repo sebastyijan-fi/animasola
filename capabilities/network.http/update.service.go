@@ -19,6 +19,10 @@ type GitHubRelease struct {
 	HtmlURL string `json:"html_url"`
 }
 
+func ReleaseAssetURL(tagName, assetName string) string {
+	return fmt.Sprintf("https://github.com/sebastyijan-fi/animasola/releases/download/%s/%s", tagName, assetName)
+}
+
 // FetchLatestRelease polls the GitHub API.
 // If ALL_PROXY is set, it routes through that proxy; otherwise it uses a direct client.
 func FetchLatestRelease() (*GitHubRelease, error) {
@@ -102,7 +106,7 @@ func DownloadReleaseAsset(downloadURL string, outPath string) error {
 	}
 
 	// Create the temporary file we'll stream the payload into
-	out, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	out, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to create temporary binary file: %w", err)
 	}

@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS users (
 	id TEXT PRIMARY KEY,
-	username TEXT NOT NULL UNIQUE,
+	username TEXT NOT NULL,
 	created_at TEXT NOT NULL
 );
 
@@ -43,10 +43,25 @@ CREATE TABLE IF NOT EXISTS public_room_index (
 	announce_count INTEGER DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS local_room_policies (
+	room_id TEXT PRIMARY KEY,
+	is_hidden BOOLEAN DEFAULT 0,
+	is_trusted BOOLEAN DEFAULT 0,
+	updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS local_peer_policies (
+	peer_id TEXT PRIMARY KEY,
+	is_muted BOOLEAN DEFAULT 0,
+	is_blocked BOOLEAN DEFAULT 0,
+	updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS messages (
 	id TEXT PRIMARY KEY,
 	room_id TEXT NOT NULL,
 	author_id TEXT NOT NULL,
+	author_username TEXT NOT NULL,
 	content TEXT NOT NULL,
 	created_at TEXT NOT NULL,
 	FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE,

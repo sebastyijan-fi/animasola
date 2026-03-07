@@ -35,3 +35,9 @@ coverage.out
 # Environment files
 .env
 .env.*
+
+# Local signing keys
+.keys/
+
+# Local scratch assets
+logo.jpeg

@@ -61,6 +61,14 @@ func main() {
 		tui.RunDoctor(ctx)
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "verify-bundle" {
+		bundleDir := ""
+		if len(os.Args) > 2 {
+			bundleDir = os.Args[2]
+		}
+		tui.RunBundleVerifier(ctx, bundleDir)
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "version" {
 		fmt.Println("animasola", tuiVersion())
 		return

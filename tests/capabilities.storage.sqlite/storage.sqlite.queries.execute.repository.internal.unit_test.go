@@ -6,9 +6,29 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	sqlite "github.com/sebastyijan/animasola/capabilities/storage.sqlite"
 )
+
+func openTestStore(t *testing.T) (*sqlite.Store, context.Context) {
+	t.Helper()
+
+	configDir := t.TempDir()
+	dbPath := filepath.Join(configDir, "animasola.db")
+
+	store, err := sqlite.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open sqlite: %v", err)
+	}
+
+	ctx := context.Background()
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("failed to migrate sqlite schema: %v", err)
+	}
+
+	return store, ctx
+}
 
 func TestSQLiteDataBoundaries(t *testing.T) {
 	configDir := t.TempDir()
@@ -252,5 +272,304 @@ func TestResetOnIncompatibleSchemaCreatesCleanDatabase(t *testing.T) {
 	}
 	if len(backups) != 1 {
 		t.Fatalf("expected exactly one archived incompatible database, found %d", len(backups))
+	}
+}
+
+func TestCreateMessageTruncatesOversizedContent(t *testing.T) {
+	store, ctx := openTestStore(t)
+
+	user, err := store.GetOrCreateUser(ctx, "writer", "writer_peer")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	room, err := store.CreateRoom(ctx, "truncate-room", "", user.ID, false, "")
+	if err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+
+	msg, err := store.CreateMessage(ctx, room.ID, user.ID, strings.Repeat("x", sqlite.MaxMessageContentRunes()+250))
+	if err != nil {
+		t.Fatalf("create message: %v", err)
+	}
+	if got := len([]rune(msg.Content)); got != sqlite.MaxMessageContentRunes() {
+		t.Fatalf("expected truncated content length %d, got %d", sqlite.MaxMessageContentRunes(), got)
+	}
+}
+
+func TestPrivateRoomMessageCountIsCapped(t *testing.T) {
+	store, ctx := openTestStore(t)
+
+	user, err := store.GetOrCreateUser(ctx, "owner", "owner_peer")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	room, err := store.CreateRoom(ctx, "private-cap-room", "", user.ID, true, "roomkey")
+	if err != nil {
+		t.Fatalf("create private room: %v", err)
+	}
+
+	for i := 0; i < 5050; i++ {
+		if _, err := store.CreateMessage(ctx, room.ID, user.ID, "m"); err != nil {
+			t.Fatalf("create message %d: %v", i+1, err)
+		}
+	}
+
+	msgs, err := store.ListMessages(ctx, room.ID, 6000)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	count := len(msgs)
+	if count != 5000 {
+		t.Fatalf("expected private room message cap of 5000, got %d", count)
+	}
+}
+
+func TestPublicRoomMetadataUpdateCooldownAllowsOneImmediateEditThenBlocksBurst(t *testing.T) {
+	store, ctx := openTestStore(t)
+
+	user, err := store.GetOrCreateUser(ctx, "owner", "owner_peer")
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	room, err := store.CreateRoom(ctx, "cooldown-room", "", user.ID, false, "")
+	if err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+
+	first, err := store.UpdatePublicRoomMetadata(ctx, room.ID, user.ID, "cooldown-room-1", "desc1", "sig1")
+	if err != nil {
+		t.Fatalf("expected first immediate update to succeed, got %v", err)
+	}
+	if first.Version != 2 {
+		t.Fatalf("expected version 2 after first update, got %d", first.Version)
+	}
+
+	_, err = store.UpdatePublicRoomMetadata(ctx, room.ID, user.ID, "cooldown-room-2", "desc2", "sig2")
+	if err == nil {
+		t.Fatalf("expected second rapid update to be blocked by cooldown")
+	}
+	if !strings.Contains(err.Error(), sqlite.PublicRoomMetadataUpdateCooldown().String()) {
+		t.Fatalf("expected cooldown error, got %v", err)
+	}
+}
+
+func TestDuplicateDisplayNamesDoNotConflictAndMessageSnapshotsAreStable(t *testing.T) {
+	store, ctx := openTestStore(t)
+
+	if err := store.EnsureRemoteUserExists(ctx, "peer-a", "shared"); err != nil {
+		t.Fatalf("ensure peer-a: %v", err)
+	}
+	if err := store.EnsureRemoteUserExists(ctx, "peer-b", "shared"); err != nil {
+		t.Fatalf("ensure peer-b: %v", err)
+	}
+
+	owner, err := store.GetOrCreateUser(ctx, "owner", "owner_peer")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	room, err := store.CreateRoom(ctx, "snapshot-room", "", owner.ID, false, "")
+	if err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+
+	if err := store.SyncMessage(ctx, &sqlite.Message{ID: "m1", RoomID: room.ID, AuthorID: "peer-a", AuthorUsername: "shared", Content: "one", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("sync first message: %v", err)
+	}
+	if err := store.SyncMessage(ctx, &sqlite.Message{ID: "m2", RoomID: room.ID, AuthorID: "peer-b", AuthorUsername: "shared", Content: "two", CreatedAt: time.Now().UTC().Add(time.Second)}); err != nil {
+		t.Fatalf("sync second message: %v", err)
+	}
+	if err := store.EnsureRemoteUserExists(ctx, "peer-a", "renamed"); err != nil {
+		t.Fatalf("rename peer-a: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	msgs, err := store.ListMessages(ctx, room.ID, 10)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	}
+	if msgs[0].AuthorUsername != "shared" || msgs[1].AuthorUsername != "shared" {
+		t.Fatalf("expected message snapshots to remain 'shared', got %q and %q", msgs[0].AuthorUsername, msgs[1].AuthorUsername)
+	}
+}
+
+func TestSearchAllRoomsRespectsLocalPolicies(t *testing.T) {
+	store, ctx := openTestStore(t)
+
+	ownerA, err := store.GetOrCreateUser(ctx, "owner-a", "owner-a")
+	if err != nil {
+		t.Fatalf("create ownerA: %v", err)
+	}
+	ownerB, err := store.GetOrCreateUser(ctx, "owner-b", "owner-b")
+	if err != nil {
+		t.Fatalf("create ownerB: %v", err)
+	}
+	ownerC, err := store.GetOrCreateUser(ctx, "owner-c", "owner-c")
+	if err != nil {
+		t.Fatalf("create ownerC: %v", err)
+	}
+
+	trustedRoom, err := store.CreateRoom(ctx, "trusted-room", "", ownerA.ID, false, "")
+	if err != nil {
+		t.Fatalf("create trusted room: %v", err)
+	}
+	hiddenRoom, err := store.CreateRoom(ctx, "hidden-room", "", ownerB.ID, false, "")
+	if err != nil {
+		t.Fatalf("create hidden room: %v", err)
+	}
+	blockedRoom, err := store.CreateRoom(ctx, "blocked-room", "", ownerC.ID, false, "")
+	if err != nil {
+		t.Fatalf("create blocked room: %v", err)
+	}
+
+	if err := store.SetRoomTrusted(ctx, trustedRoom.ID, true); err != nil {
+		t.Fatalf("trust room: %v", err)
+	}
+	if err := store.SetRoomHidden(ctx, hiddenRoom.ID, true); err != nil {
+		t.Fatalf("hide room: %v", err)
+	}
+	if err := store.SetPeerBlocked(ctx, ownerC.ID, true); err != nil {
+		t.Fatalf("block creator: %v", err)
+	}
+
+	rooms, err := store.SearchAllRooms(ctx)
+	if err != nil {
+		t.Fatalf("search rooms: %v", err)
+	}
+	if len(rooms) != 1 {
+		t.Fatalf("expected only one visible public room, got %d", len(rooms))
+	}
+	if rooms[0].ID != trustedRoom.ID {
+		t.Fatalf("expected trusted room to remain visible first, got %q", rooms[0].ID)
+	}
+	if !rooms[0].IsTrusted {
+		t.Fatalf("expected trusted flag to be populated on visible room")
+	}
+	if rooms[0].ID == blockedRoom.ID {
+		t.Fatalf("blocked creator room should not be visible in search")
+	}
+}
+
+func TestListJoinedPublicRoomsRespectsLocalPolicies(t *testing.T) {
+	store, ctx := openTestStore(t)
+
+	viewer, err := store.GetOrCreateUser(ctx, "viewer", "viewer")
+	if err != nil {
+		t.Fatalf("create viewer: %v", err)
+	}
+	ownerA, err := store.GetOrCreateUser(ctx, "owner-a", "owner-a")
+	if err != nil {
+		t.Fatalf("create ownerA: %v", err)
+	}
+	ownerB, err := store.GetOrCreateUser(ctx, "owner-b", "owner-b")
+	if err != nil {
+		t.Fatalf("create ownerB: %v", err)
+	}
+	ownerC, err := store.GetOrCreateUser(ctx, "owner-c", "owner-c")
+	if err != nil {
+		t.Fatalf("create ownerC: %v", err)
+	}
+
+	trustedRoom, err := store.CreateRoom(ctx, "trusted-room", "", ownerA.ID, false, "")
+	if err != nil {
+		t.Fatalf("create trusted room: %v", err)
+	}
+	hiddenRoom, err := store.CreateRoom(ctx, "hidden-room", "", ownerB.ID, false, "")
+	if err != nil {
+		t.Fatalf("create hidden room: %v", err)
+	}
+	blockedRoom, err := store.CreateRoom(ctx, "blocked-room", "", ownerC.ID, false, "")
+	if err != nil {
+		t.Fatalf("create blocked room: %v", err)
+	}
+
+	for _, roomID := range []string{trustedRoom.ID, hiddenRoom.ID, blockedRoom.ID} {
+		if err := store.JoinRoom(ctx, viewer.ID, roomID); err != nil {
+			t.Fatalf("join room %s: %v", roomID, err)
+		}
+	}
+
+	if err := store.SetRoomTrusted(ctx, trustedRoom.ID, true); err != nil {
+		t.Fatalf("trust room: %v", err)
+	}
+	if err := store.SetRoomHidden(ctx, hiddenRoom.ID, true); err != nil {
+		t.Fatalf("hide room: %v", err)
+	}
+	if err := store.SetPeerBlocked(ctx, ownerC.ID, true); err != nil {
+		t.Fatalf("block creator: %v", err)
+	}
+
+	rooms, err := store.ListJoinedPublicRooms(ctx, viewer.ID)
+	if err != nil {
+		t.Fatalf("list joined public rooms: %v", err)
+	}
+	if len(rooms) != 1 {
+		t.Fatalf("expected only one joined public room eligible for rebroadcast, got %d", len(rooms))
+	}
+	if rooms[0].ID != trustedRoom.ID {
+		t.Fatalf("expected trusted room to remain rebroadcastable, got %q", rooms[0].ID)
+	}
+	if !rooms[0].IsTrusted {
+		t.Fatalf("expected trusted room flag to be populated")
+	}
+}
+
+func TestListMessagesRespectsMutedAndBlockedPeers(t *testing.T) {
+	store, ctx := openTestStore(t)
+
+	owner, err := store.GetOrCreateUser(ctx, "owner", "owner")
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	visibleAuthor, err := store.GetOrCreateUser(ctx, "visible", "visible")
+	if err != nil {
+		t.Fatalf("create visible author: %v", err)
+	}
+	mutedAuthor, err := store.GetOrCreateUser(ctx, "muted", "muted")
+	if err != nil {
+		t.Fatalf("create muted author: %v", err)
+	}
+	blockedAuthor, err := store.GetOrCreateUser(ctx, "blocked", "blocked")
+	if err != nil {
+		t.Fatalf("create blocked author: %v", err)
+	}
+
+	room, err := store.CreateRoom(ctx, "room", "", owner.ID, false, "")
+	if err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+
+	if _, err := store.CreateMessage(ctx, room.ID, visibleAuthor.ID, "visible"); err != nil {
+		t.Fatalf("create visible message: %v", err)
+	}
+	if _, err := store.CreateMessage(ctx, room.ID, mutedAuthor.ID, "muted"); err != nil {
+		t.Fatalf("create muted message: %v", err)
+	}
+	if _, err := store.CreateMessage(ctx, room.ID, blockedAuthor.ID, "blocked"); err != nil {
+		t.Fatalf("create blocked message: %v", err)
+	}
+
+	if err := store.SetPeerMuted(ctx, mutedAuthor.ID, true); err != nil {
+		t.Fatalf("mute author: %v", err)
+	}
+	if err := store.SetPeerBlocked(ctx, blockedAuthor.ID, true); err != nil {
+		t.Fatalf("block author: %v", err)
+	}
+
+	msgs, err := store.ListMessages(ctx, room.ID, 100)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected only one visible message after mute/block filters, got %d", len(msgs))
+	}
+	if msgs[0].AuthorID != visibleAuthor.ID {
+		t.Fatalf("expected only visible author message to remain, got %q", msgs[0].AuthorID)
+	}
+	if msgs[0].Content != "visible" {
+		t.Fatalf("expected visible message content to remain, got %q", msgs[0].Content)
 	}
 }

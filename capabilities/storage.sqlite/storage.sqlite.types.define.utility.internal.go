@@ -24,12 +24,17 @@ type Room struct {
 	Version       int
 	AnnounceCount int
 	HasUnread     bool
+	IsHidden      bool
+	IsTrusted     bool
+	CreatorMuted  bool
+	CreatorBlocked bool
 }
 
 type Message struct {
 	ID        string
 	RoomID    string
 	AuthorID  string
+	AuthorUsername string
 	Content   string
 	CreatedAt time.Time
 }

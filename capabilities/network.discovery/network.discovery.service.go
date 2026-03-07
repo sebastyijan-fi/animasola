@@ -12,6 +12,7 @@ import (
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	peer "github.com/libp2p/go-libp2p/core/peer"
 	keys "github.com/sebastyijan/animasola/capabilities/identity.keys"
+	registry "github.com/sebastyijan/animasola/capabilities/network.registry"
 	p2p "github.com/sebastyijan/animasola/capabilities/network.p2p"
 	sqlite "github.com/sebastyijan/animasola/capabilities/storage.sqlite"
 )
@@ -21,6 +22,8 @@ const GlobalDiscoveryTopic = "animasola/global/room-discovery"
 const (
 	messageTypeAnnounce        = "announce"
 	messageTypeSnapshotRequest = "snapshot_request"
+	snapshotResponseMinInterval     = 15 * time.Second
+	snapshotResponsePerPeerCooldown = 2 * time.Minute
 )
 
 type roomDiscoveryMessage struct {
@@ -39,16 +42,19 @@ type Service struct {
 	node   *p2p.Node
 	store  *sqlite.Store
 	user   *sqlite.User
+	registry *registry.Client
 	topic  *pubsub.Topic
 	cancel context.CancelFunc
 	mu     sync.RWMutex
 	state  Status
+	snapshotResponses map[string]time.Time
 }
 
 type Status struct {
 	StartedAt              time.Time
 	FirstDiscoveryPeerAt   time.Time
 	LastSnapshotRequestAt  time.Time
+	LastSnapshotResponseAt time.Time
 	LastAnnouncementAt     time.Time
 	LastRemoteAnnouncement time.Time
 	KnownPeerCount         int
@@ -56,12 +62,14 @@ type Status struct {
 	SnapshotRequestCount   int
 }
 
-func NewService(node *p2p.Node, store *sqlite.Store, user *sqlite.User) *Service {
+func NewService(node *p2p.Node, store *sqlite.Store, user *sqlite.User, registryClient *registry.Client) *Service {
 	return &Service{
-		node:  node,
-		store: store,
-		user:  user,
-		state: Status{StartedAt: time.Now().UTC()},
+		node:     node,
+		store:    store,
+		user:     user,
+		registry: registryClient,
+		state:    Status{StartedAt: time.Now().UTC()},
+		snapshotResponses: make(map[string]time.Time),
 	}
 }
 
@@ -112,6 +120,15 @@ func (s *Service) BroadcastRoom(ctx context.Context, room *sqlite.Room) error {
 func (s *Service) PublishRoomSync(ctx context.Context, room *sqlite.Room) error {
 	if s == nil || s.topic == nil || room == nil {
 		return nil
+	}
+	if !room.IsPrivate && s.registry != nil {
+		allowed, err := s.validatePublicRoom(ctx, s.node.Host.ID().String(), room.ID)
+		if err != nil {
+			return fmt.Errorf("failed to validate public room before publish: %w", err)
+		}
+		if !allowed {
+			return fmt.Errorf("public room is not registry-approved for publish")
+		}
 	}
 	if room.UpdatedAt.IsZero() {
 		room.UpdatedAt = room.CreatedAt
@@ -192,8 +209,10 @@ func (s *Service) listen(ctx context.Context, sub *pubsub.Subscription, discover
 		case "", messageTypeAnnounce:
 			s.markRemoteAnnouncement()
 		case messageTypeSnapshotRequest:
-			s.markSnapshotObserved()
-			go s.publishKnownPublicRooms(ctx)
+			if s.shouldRespondToSnapshotRequest(msg.ReceivedFrom.String(), time.Now().UTC()) {
+				s.markSnapshotObserved()
+				go s.publishKnownPublicRooms(ctx)
+			}
 			continue
 		default:
 			continue
@@ -203,6 +222,11 @@ func (s *Service) listen(ctx context.Context, sub *pubsub.Subscription, discover
 			continue
 		}
 		if !verifyMessage(discoveryMsg, msg.ReceivedFrom.String()) {
+			continue
+		}
+
+		allowed, err := s.validatePublicRoom(ctx, discoveryMsg.CreatorID, discoveryMsg.RoomID)
+		if err != nil || !allowed {
 			continue
 		}
 
@@ -248,7 +272,7 @@ func (s *Service) publishKnownPublicRooms(ctx context.Context) {
 	if s.topic == nil {
 		return
 	}
-	rooms, err := s.store.ListJoinedPublicRooms(ctx, s.user.ID)
+	rooms, err := s.store.ListOwnedPublicRooms(ctx, s.user.ID)
 	if err != nil {
 		return
 	}
@@ -258,6 +282,15 @@ func (s *Service) publishKnownPublicRooms(ctx context.Context) {
 		_ = s.PublishRoomSync(pubCtx, &room)
 		cancel()
 	}
+}
+
+func (s *Service) validatePublicRoom(ctx context.Context, creatorID, roomID string) (bool, error) {
+	if s.registry == nil {
+		return true, nil
+	}
+	validateCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return s.registry.ValidatePublicRoom(validateCtx, creatorID, roomID)
 }
 
 func (s *Service) UpdatePublicRoomMetadata(ctx context.Context, roomID, ownerID, name, description string) (*sqlite.Room, error) {
@@ -367,6 +400,27 @@ func (s *Service) markSnapshotObserved() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.state.SnapshotRequestCount++
+}
+
+func (s *Service) shouldRespondToSnapshotRequest(peerID string, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.snapshotResponses == nil {
+		s.snapshotResponses = make(map[string]time.Time)
+	}
+
+	if last := s.state.LastSnapshotResponseAt; !last.IsZero() && now.Sub(last) < snapshotResponseMinInterval {
+		return false
+	}
+
+	if last := s.snapshotResponses[peerID]; !last.IsZero() && now.Sub(last) < snapshotResponsePerPeerCooldown {
+		return false
+	}
+
+	s.snapshotResponses[peerID] = now
+	s.state.LastSnapshotResponseAt = now
+	return true
 }
 
 func (s *Service) markRemoteAnnouncement() {

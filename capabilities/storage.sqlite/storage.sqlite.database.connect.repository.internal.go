@@ -55,12 +55,16 @@ func (s *Store) processSyncQueue() {
 		case job := <-s.syncQueue:
 			createdAtStr := job.m.CreatedAt.Format(SortableTimeFormat)
 			_, err := s.db.ExecContext(job.ctx, `
-				INSERT INTO messages (id, room_id, author_id, content, created_at)
-				VALUES (?, ?, ?, ?, ?)
+				INSERT INTO messages (id, room_id, author_id, author_username, content, created_at)
+				VALUES (?, ?, ?, ?, ?, ?)
 				ON CONFLICT DO NOTHING
-			`, job.m.ID, job.m.RoomID, job.m.AuthorID, job.m.Content, createdAtStr)
+			`, job.m.ID, job.m.RoomID, job.m.AuthorID, job.m.AuthorUsername, job.m.Content, createdAtStr)
 			if err != nil {
 				fmt.Printf("Warning: failed to sync message asynchronously: %v\n", err)
+				continue
+			}
+			if err := s.enforceRoomMessageLimit(job.ctx, job.m.RoomID); err != nil {
+				fmt.Printf("Warning: failed to enforce room message cap: %v\n", err)
 			}
 		}
 	}

@@ -91,6 +91,21 @@ func GetOrGenerateKey(username string) (*Keys, error) {
 	return generateAndSaveKey(keyPath)
 }
 
+// LoadKey loads an existing application-specific Ed25519 keypair without generating a new one.
+func LoadKey(username string) (*Keys, error) {
+	configRoot, err := os.UserConfigDir()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get config dir: %w", err)
+	}
+
+	keyPath := filepath.Join(configRoot, "animasola", username, "id_ed25519")
+	if _, err := os.Stat(keyPath); err != nil {
+		return nil, fmt.Errorf("failed to access key file: %w", err)
+	}
+
+	return loadKey(keyPath)
+}
+
 func generateAndSaveKey(path string) (*Keys, error) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

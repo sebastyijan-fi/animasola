@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,12 +19,35 @@ import (
 )
 
 func logTUIDebug(format string, a ...interface{}) {
-	f, err := os.OpenFile("/tmp/network_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600) // #nosec G302 -- Enforcing strict local-only permissions
+	if os.Getenv("ANIMASOLA_DEBUG_NETWORK") != "1" {
+		return
+	}
+
+	logPath, err := tuiDebugLogPath()
+	if err != nil {
+		return
+	}
+
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600) // #nosec G302 -- Enforcing strict local-only permissions
 	if err == nil {
 		defer f.Close()
 		msg := fmt.Sprintf(format, a...)
 		f.WriteString(time.Now().Format(time.RFC3339) + " [TUI] " + msg + "\n")
 	}
+}
+
+func tuiDebugLogPath() (string, error) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+
+	logDir := filepath.Join(configDir, "animasola")
+	if err := os.MkdirAll(logDir, 0700); err != nil {
+		return "", err
+	}
+
+	return filepath.Join(logDir, "network_debug.log"), nil
 }
 
 type MessagesLoadedMsg []sqlite.FeedMessage

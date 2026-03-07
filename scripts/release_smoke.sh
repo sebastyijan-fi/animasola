@@ -21,6 +21,12 @@ esac
 
 artifact="animasola-${os}-${arch}.tar.gz"
 
+export ANIMASOLA_RELEASE_TARGETS="${os}/${arch}"
+export ANIMASOLA_REQUIRE_SIGNED_RELEASE=1
+if [[ -z "${ANIMASOLA_RELEASE_SIGNING_KEY:-}" && -f "$ROOT_DIR/.keys/release-signing-private.b64" ]]; then
+    export ANIMASOLA_RELEASE_SIGNING_KEY="$ROOT_DIR/.keys/release-signing-private.b64"
+fi
+
 echo "==> building release bundles"
 "$ROOT_DIR/scripts/build_release.sh"
 

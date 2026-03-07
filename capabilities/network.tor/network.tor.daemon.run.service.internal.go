@@ -25,10 +25,15 @@ func Start(ctx context.Context, binaryPath string, cfg *Config) (*Runner, <-chan
 		cancel: cancel,
 	}
 
+	runtimeLogDir := filepath.Dir(cfg.TorrcPath)
+
 	// Build the command
 	cmd := exec.CommandContext(r.ctx, binaryPath, "-f", cfg.TorrcPath) // #nosec G204 -- Binary path is strictly bound to Animasola AppData dir
 	// Capture stderr to file for debugging fatal Tor panics
-	errFile, _ := os.OpenFile("/tmp/tor_stderr.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	errFile, err := os.OpenFile(filepath.Join(runtimeLogDir, "tor_stderr.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create tor stderr log: %w", err)
+	}
 	cmd.Stderr = errFile
 
 	// Prevent zombie Tor daemons across OS platforms
@@ -59,14 +64,18 @@ func Start(ctx context.Context, binaryPath string, cfg *Config) (*Runner, <-chan
 		defer close(progressCh)
 
 		// DEBUG: dump all of Tor's stdout
-		outLog, _ := os.OpenFile("/tmp/tor_stdout.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-		defer outLog.Close()
+		outLog, outErr := os.OpenFile(filepath.Join(runtimeLogDir, "tor_stdout.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+		if outErr == nil {
+			defer outLog.Close()
+		}
 
 		scanner := bufio.NewScanner(stdout)
 		bootstrapped := false
 		for scanner.Scan() {
 			line := scanner.Text()
-			outLog.WriteString(line + "\n")
+			if outErr == nil {
+				outLog.WriteString(line + "\n")
+			}
 
 			if !bootstrapped {
 				// Only forward notice logs regarding bootstrap to the UI

@@ -18,6 +18,8 @@ TMP_DIR="$(mktemp -d)"
 SUDO="${SUDO_BIN:-sudo}"
 INSTALL_PARENT="$(dirname "$INSTALL_ROOT")"
 BIN_PARENT="$(dirname "$BIN_TARGET")"
+BUNDLE_LISTING="$TMP_DIR/bundle-listing.txt"
+BUNDLE_TYPES="$TMP_DIR/bundle-types.txt"
 
 cleanup() {
     rm -rf "$TMP_DIR"
@@ -29,14 +31,83 @@ if [[ ! -f "$BUNDLE_ARCHIVE" ]]; then
     exit 1
 fi
 
-echo "-> Extracting release bundle..."
-tar -xzf "$BUNDLE_ARCHIVE" -C "$TMP_DIR"
+echo "-> Validating release bundle..."
+tar -tzf "$BUNDLE_ARCHIVE" > "$BUNDLE_LISTING"
+tar -tvzf "$BUNDLE_ARCHIVE" > "$BUNDLE_TYPES"
 
-BUNDLE_DIR="$(find "$TMP_DIR" -maxdepth 1 -mindepth 1 -type d | head -n 1)"
+TOP_LEVEL_DIRS="$(awk -F/ 'NF {print $1}' "$BUNDLE_LISTING" | sort -u)"
+TOP_LEVEL_COUNT="$(printf '%s\n' "$TOP_LEVEL_DIRS" | sed '/^$/d' | wc -l | tr -d ' ')"
+if [[ "$TOP_LEVEL_COUNT" != "1" ]]; then
+    echo "ERROR: release bundle must contain exactly one top-level directory"
+    exit 1
+fi
+
+BUNDLE_ROOT="$(printf '%s\n' "$TOP_LEVEL_DIRS" | sed -n '1p')"
+if [[ -z "$BUNDLE_ROOT" || "$BUNDLE_ROOT" == "." || "$BUNDLE_ROOT" == ".." ]]; then
+    echo "ERROR: invalid bundle root directory"
+    exit 1
+fi
+
+while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    if [[ "$entry" == /* || "$entry" == *"../"* || "$entry" == "../"* || "$entry" == *"/.." ]]; then
+        echo "ERROR: refusing unsafe bundle path: $entry"
+        exit 1
+    fi
+done < "$BUNDLE_LISTING"
+
+if ! grep -Eq "^${BUNDLE_ROOT}/animasola$" "$BUNDLE_LISTING"; then
+    echo "ERROR: bundle is missing animasola binary"
+    exit 1
+fi
+if ! grep -Eq "^${BUNDLE_ROOT}/install.sh$" "$BUNDLE_LISTING"; then
+    echo "ERROR: bundle is missing install.sh"
+    exit 1
+fi
+if ! grep -Eq "^${BUNDLE_ROOT}/README.md$" "$BUNDLE_LISTING"; then
+    echo "ERROR: bundle is missing README.md"
+    exit 1
+fi
+if ! grep -Eq "^${BUNDLE_ROOT}/bundle-manifest.txt$" "$BUNDLE_LISTING"; then
+    echo "ERROR: bundle is missing bundle-manifest.txt"
+    exit 1
+fi
+if ! grep -Eq "^${BUNDLE_ROOT}/bundle-manifest.txt.sig$" "$BUNDLE_LISTING"; then
+    echo "ERROR: bundle is missing bundle-manifest.txt.sig"
+    exit 1
+fi
+if ! grep -Eq "^${BUNDLE_ROOT}/tor/tor$" "$BUNDLE_LISTING"; then
+    echo "ERROR: bundle is missing bundled tor runtime"
+    exit 1
+fi
+
+if awk 'substr($1,1,1) !~ /[-d]/ { exit 1 }' "$BUNDLE_TYPES"; then
+    :
+else
+    echo "ERROR: bundle contains unsupported entry types (only regular files and directories are allowed)"
+    exit 1
+fi
+
+echo "-> Extracting release bundle..."
+tar -xzf "$BUNDLE_ARCHIVE" -C "$TMP_DIR" --no-same-owner --no-same-permissions
+
+BUNDLE_DIR="$TMP_DIR/$BUNDLE_ROOT"
 if [[ -z "$BUNDLE_DIR" ]]; then
     echo "ERROR: could not find extracted bundle directory"
     exit 1
 fi
+
+if [[ ! -f "$BUNDLE_DIR/animasola" || ! -f "$BUNDLE_DIR/install.sh" || ! -f "$BUNDLE_DIR/README.md" || ! -f "$BUNDLE_DIR/tor/tor" ]]; then
+    echo "ERROR: extracted bundle contents did not match expected files"
+    exit 1
+fi
+if [[ ! -f "$BUNDLE_DIR/bundle-manifest.txt" || ! -f "$BUNDLE_DIR/bundle-manifest.txt.sig" ]]; then
+    echo "ERROR: extracted bundle is missing signed manifest files"
+    exit 1
+fi
+
+echo "-> Verifying signed bundle contents..."
+"$BUNDLE_DIR/animasola" verify-bundle "$BUNDLE_DIR"
 
 echo "-> Installing bundle into $INSTALL_ROOT"
 mkdir -p "$INSTALL_PARENT" "$BIN_PARENT"

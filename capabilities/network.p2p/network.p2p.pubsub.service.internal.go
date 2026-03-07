@@ -9,20 +9,80 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
+	registry "github.com/sebastyijan/animasola/capabilities/network.registry"
 	sqlite "github.com/sebastyijan/animasola/capabilities/storage.sqlite"
 )
 
+const maxNetworkPayloadBytes = 8 * 1024
+const inboundMessageBurstLimit = 20
+const inboundRoomBurstLimit = 30
+const inboundMessageBurstWindow = 10 * time.Second
+
+type inboundMessageLimiter struct {
+	entries map[string][]time.Time
+}
+
+func newInboundMessageLimiter() *inboundMessageLimiter {
+	return &inboundMessageLimiter{entries: make(map[string][]time.Time)}
+}
+
+func (l *inboundMessageLimiter) allow(authorID string, now time.Time) bool {
+	return l.allowWithLimit(authorID, now, inboundMessageBurstLimit)
+}
+
+func (l *inboundMessageLimiter) allowWithLimit(key string, now time.Time, limit int) bool {
+	cutoff := now.Add(-inboundMessageBurstWindow)
+	items := l.entries[key]
+	filtered := items[:0]
+	for _, ts := range items {
+		if ts.After(cutoff) {
+			filtered = append(filtered, ts)
+		}
+	}
+	if len(filtered) >= limit {
+		l.entries[key] = filtered
+		return false
+	}
+	l.entries[key] = append(filtered, now)
+	return true
+}
+
 func logDebug(format string, a ...interface{}) {
-	f, err := os.OpenFile("/tmp/network_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if os.Getenv("ANIMASOLA_DEBUG_NETWORK") != "1" {
+		return
+	}
+
+	logPath, err := networkDebugLogPath()
+	if err != nil {
+		return
+	}
+
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err == nil {
 		defer f.Close()
 		msg := fmt.Sprintf(format, a...)
 		f.WriteString(time.Now().Format(time.RFC3339) + " " + msg + "\n")
 	}
+}
+
+func networkDebugLogPath() (string, error) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+
+	logDir := filepath.Join(configDir, "animasola")
+	if err := os.MkdirAll(logDir, 0700); err != nil {
+		return "", err
+	}
+
+	return filepath.Join(logDir, "network_debug.log"), nil
 }
 
 // NetworkMessage is the JSON payload we send over GossipSub
@@ -201,6 +261,9 @@ func (r *Room) Publish(ctx context.Context, msg *sqlite.Message, roomName string
 
 // Listen blocks and waits for new messages, writing them to the SQLite store
 func (r *Room) Listen(db *sqlite.Store, hostID string, onNewMessage func(sqlite.FeedMessage)) {
+	authorLimiter := newInboundMessageLimiter()
+	roomLimiter := newInboundMessageLimiter()
+	registryClient := registry.NewClient()
 	for {
 		select {
 		case <-r.ctx.Done():
@@ -214,6 +277,11 @@ func (r *Room) Listen(db *sqlite.Store, hostID string, onNewMessage func(sqlite.
 
 			// Don't process our own messages, we already saved them locally when sending
 			if msg.ReceivedFrom.String() == hostID {
+				continue
+			}
+
+			if len(msg.Data) > maxNetworkPayloadBytes {
+				logDebug("Listen: dropping oversized inbound payload length %d", len(msg.Data))
 				continue
 			}
 
@@ -262,17 +330,40 @@ func (r *Room) Listen(db *sqlite.Store, hostID string, onNewMessage func(sqlite.
 				fmt.Printf("SECURITY ALERT: Dropping forged payload! Inner Author %s does not match Outer Envelope Signature %s\n", netMsg.AuthorID, msg.ReceivedFrom.String())
 				continue
 			}
+			if netMsg.RoomID != r.ID {
+				logDebug("Listen: dropping cross-room payload room=%s expected=%s", netMsg.RoomID, r.ID)
+				continue
+			}
+			now := time.Now().UTC()
+			if !authorLimiter.allow(netMsg.AuthorID, now) {
+				logDebug("Listen: dropping burst payload from author %s", netMsg.AuthorID)
+				continue
+			}
+			if !roomLimiter.allowWithLimit(r.ID, now, inboundRoomBurstLimit) {
+				logDebug("Listen: dropping aggregate room burst payload room=%s", r.ID)
+				continue
+			}
 
-			// We need to ensure the author exists in our local DB before inserting the message
-			// Use the provided username if available, else fallback to Guest ID for old clients
 			username := netMsg.AuthorUsername
-			if username == "" {
-				username = "Guest-" + netMsg.AuthorID[:8]
+			if username == "" || strings.TrimSpace(username) != username {
+				logDebug("Listen: dropping message with missing or malformed username from %s", netMsg.AuthorID)
+				continue
 			}
 			usernameRunes := []rune(username)
 			if len(usernameRunes) > 32 {
-				username = string(usernameRunes[:32])
+				logDebug("Listen: dropping message with oversized username from %s", netMsg.AuthorID)
+				continue
 			}
+			allowed, err := registryClient.ValidateProfile(r.ctx, username, netMsg.AuthorID)
+			if err != nil {
+				logDebug("Listen: dropping message because registry profile validation failed for %s/%s: %v", username, netMsg.AuthorID, err)
+				continue
+			}
+			if !allowed {
+				logDebug("Listen: dropping message because username %s is not bound to %s", username, netMsg.AuthorID)
+				continue
+			}
+
 			err = db.EnsureRemoteUserExists(r.ctx, netMsg.AuthorID, username)
 			if err != nil {
 				logDebug("Listen: failed to ensure remote user: %v", err)
@@ -307,16 +398,17 @@ func (r *Room) Listen(db *sqlite.Store, hostID string, onNewMessage func(sqlite.
 
 			// Enforce max chat length to prevent malicious UI freezing
 			contentRunes := []rune(netMsg.Content)
-			if len(contentRunes) > 2000 {
-				netMsg.Content = string(contentRunes[:2000])
+			if len(contentRunes) > sqlite.MaxMessageContentRunes() {
+				netMsg.Content = string(contentRunes[:sqlite.MaxMessageContentRunes()])
 			}
 
 			dbMsg := sqlite.Message{
-				ID:        netMsg.ID,
-				RoomID:    netMsg.RoomID,
-				AuthorID:  netMsg.AuthorID,
-				Content:   netMsg.Content,
-				CreatedAt: t,
+				ID:             netMsg.ID,
+				RoomID:         netMsg.RoomID,
+				AuthorID:       netMsg.AuthorID,
+				AuthorUsername: username,
+				Content:        netMsg.Content,
+				CreatedAt:      t,
 			}
 
 			// If the message brings a RoomName, we should update our local stub room if it's currently generic
@@ -343,6 +435,7 @@ func (r *Room) Listen(db *sqlite.Store, hostID string, onNewMessage func(sqlite.
 					ID:        dbMsg.ID,
 					RoomID:    dbMsg.RoomID,
 					AuthorID:  dbMsg.AuthorID,
+					AuthorUsername: dbMsg.AuthorUsername,
 					Content:   dbMsg.Content,
 					CreatedAt: dbMsg.CreatedAt,
 				},

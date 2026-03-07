@@ -16,6 +16,11 @@ import (
 // preventing SQLite's lexicographical sorting from erroneously evaluating "Z" as greater than ".".
 const SortableTimeFormat = "2006-01-02T15:04:05.000000000Z"
 const publicRoomFreshnessTTL = 24 * time.Hour
+const maxPrivateRoomsPerCreator = 100
+const maxMessageContentRunes = 2000
+const maxStoredMessagesPerPublicRoom = 2000
+const maxStoredMessagesPerPrivateRoom = 5000
+const publicRoomMetadataUpdateCooldown = 10 * time.Second
 
 // StartDataPruning runs a background goroutine that deletes messages older than the retention period.
 func (s *Store) StartDataPruning(ctx context.Context, retention time.Duration) {
@@ -126,6 +131,13 @@ func (s *Store) CreateRoom(ctx context.Context, name, description string, creato
 
 	var id string
 	if isPrivate {
+		var privateRoomCount int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM rooms WHERE creator_id = ? AND is_private = 1`, creatorID).Scan(&privateRoomCount); err != nil {
+			return nil, err
+		}
+		if privateRoomCount >= maxPrivateRoomsPerCreator {
+			return nil, fmt.Errorf("private room limit reached (%d max per profile)", maxPrivateRoomsPerCreator)
+		}
 		id = newID()
 	} else {
 		hasher := sha256.New()
@@ -176,6 +188,48 @@ func (s *Store) CreateRoom(ctx context.Context, name, description string, creato
 	}
 
 	return r, nil
+}
+
+func (s *Store) ListOwnedPublicRooms(ctx context.Context, userID string) ([]Room, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT r.id, r.name, r.description, r.creator_id, r.signature, r.created_at, r.updated_at, r.last_seen_at, r.version, COALESCE(r.announce_count, 0)
+		FROM rooms r
+		JOIN memberships m ON m.room_id = r.id
+		WHERE m.user_id = ? AND m.role = 'owner' AND r.creator_id = ? AND r.is_private = 0
+		ORDER BY COALESCE(r.last_seen_at, r.created_at) DESC, r.name ASC
+	`, userID, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rooms []Room
+	for rows.Next() {
+		var r Room
+		var createdAtStr string
+		var updatedAtStr sql.NullString
+		var creatorID sql.NullString
+		var signature sql.NullString
+		var lastSeenAtStr sql.NullString
+		if err := rows.Scan(&r.ID, &r.Name, &r.Description, &creatorID, &signature, &createdAtStr, &updatedAtStr, &lastSeenAtStr, &r.Version, &r.AnnounceCount); err != nil {
+			return nil, err
+		}
+		if creatorID.Valid {
+			r.CreatorID = creatorID.String
+		}
+		if signature.Valid {
+			r.Signature = signature.String
+		}
+		r.CreatedAt, _ = time.Parse(SortableTimeFormat, createdAtStr)
+		if updatedAtStr.Valid {
+			r.UpdatedAt, _ = time.Parse(SortableTimeFormat, updatedAtStr.String)
+		}
+		if lastSeenAtStr.Valid {
+			r.LastSeenAt, _ = time.Parse(SortableTimeFormat, lastSeenAtStr.String)
+		}
+		rooms = append(rooms, r)
+	}
+	return rooms, rows.Err()
 }
 
 // EnsurePublicRoomExists silently inserts a public room into the database if it doesn't already exist.
@@ -377,6 +431,12 @@ func (s *Store) UpdatePublicRoomMetadata(ctx context.Context, roomID, ownerID, n
 	if lastSeenAtStr.Valid {
 		r.LastSeenAt, _ = time.Parse(SortableTimeFormat, lastSeenAtStr.String)
 	}
+	if !r.UpdatedAt.IsZero() && r.Version > 1 {
+		now := time.Now().UTC()
+		if now.Sub(r.UpdatedAt) < publicRoomMetadataUpdateCooldown {
+			return nil, fmt.Errorf("public room metadata can only be updated every %s", publicRoomMetadataUpdateCooldown)
+		}
+	}
 
 	r.Name = name
 	r.Description = description
@@ -414,11 +474,17 @@ func (s *Store) ListRooms(ctx context.Context, userID string) ([]Room, error) {
 		        FROM messages m2 
 		        WHERE m2.room_id = r.id 
 		          AND m2.created_at > COALESCE(m.last_read_at, r.created_at)
-		          AND m2.author_id != m.user_id) as has_unread
+		          AND m2.author_id != m.user_id) as has_unread,
+		       COALESCE(lrp.is_hidden, 0) as is_hidden,
+		       COALESCE(lrp.is_trusted, 0) as is_trusted,
+		       COALESCE(lpp.is_muted, 0) as creator_muted,
+		       COALESCE(lpp.is_blocked, 0) as creator_blocked
 		FROM rooms r
 		JOIN memberships m ON m.room_id = r.id
+		LEFT JOIN local_room_policies lrp ON lrp.room_id = r.id
+		LEFT JOIN local_peer_policies lpp ON lpp.peer_id = r.creator_id
 		WHERE m.user_id = ?
-		ORDER BY has_unread DESC, r.name ASC
+		ORDER BY has_unread DESC, COALESCE(lrp.is_trusted, 0) DESC, r.name ASC
 	`, userID)
 	if err != nil {
 		return nil, err
@@ -435,8 +501,12 @@ func (s *Store) ListRooms(ctx context.Context, userID string) ([]Room, error) {
 		var lastSeenAtStr sql.NullString
 		var isPrivateLocal sql.NullBool
 		var roomKeyLocal sql.NullString
+		var isHidden bool
+		var isTrusted bool
+		var creatorMuted bool
+		var creatorBlocked bool
 
-		if err := rows.Scan(&r.ID, &r.Name, &r.Description, &creatorID, &signature, &isPrivateLocal, &roomKeyLocal, &createdAtStr, &updatedAtStr, &lastSeenAtStr, &r.Version, &r.HasUnread); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Description, &creatorID, &signature, &isPrivateLocal, &roomKeyLocal, &createdAtStr, &updatedAtStr, &lastSeenAtStr, &r.Version, &r.HasUnread, &isHidden, &isTrusted, &creatorMuted, &creatorBlocked); err != nil {
 			return nil, err
 		}
 		if creatorID.Valid {
@@ -460,6 +530,10 @@ func (s *Store) ListRooms(ctx context.Context, userID string) ([]Room, error) {
 		if lastSeenAtStr.Valid {
 			r.LastSeenAt, _ = time.Parse(SortableTimeFormat, lastSeenAtStr.String)
 		}
+		r.IsHidden = isHidden
+		r.IsTrusted = isTrusted
+		r.CreatorMuted = creatorMuted
+		r.CreatorBlocked = creatorBlocked
 		rooms = append(rooms, r)
 	}
 	return rooms, rows.Err()
@@ -467,10 +541,18 @@ func (s *Store) ListRooms(ctx context.Context, userID string) ([]Room, error) {
 
 func (s *Store) SearchAllRooms(ctx context.Context) ([]Room, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT room_id, name, description, creator_id, signature, created_at, updated_at, last_seen_at, version, announce_count
-		FROM public_room_index
-		WHERE COALESCE(last_seen_at, created_at) >= ?
-		ORDER BY COALESCE(last_seen_at, created_at) DESC, name ASC
+		SELECT pri.room_id, pri.name, pri.description, pri.creator_id, pri.signature, pri.created_at, pri.updated_at, pri.last_seen_at, pri.version, pri.announce_count,
+		       COALESCE(lrp.is_hidden, 0) as is_hidden,
+		       COALESCE(lrp.is_trusted, 0) as is_trusted,
+		       COALESCE(lpp.is_muted, 0) as creator_muted,
+		       COALESCE(lpp.is_blocked, 0) as creator_blocked
+		FROM public_room_index pri
+		LEFT JOIN local_room_policies lrp ON lrp.room_id = pri.room_id
+		LEFT JOIN local_peer_policies lpp ON lpp.peer_id = pri.creator_id
+		WHERE COALESCE(pri.last_seen_at, pri.created_at) >= ?
+		  AND COALESCE(lrp.is_hidden, 0) = 0
+		  AND COALESCE(lpp.is_blocked, 0) = 0
+		ORDER BY COALESCE(lrp.is_trusted, 0) DESC, COALESCE(pri.last_seen_at, pri.created_at) DESC, pri.name ASC
 	`, time.Now().UTC().Add(-publicRoomFreshnessTTL).Format(SortableTimeFormat))
 	if err != nil {
 		return nil, err
@@ -484,7 +566,11 @@ func (s *Store) SearchAllRooms(ctx context.Context) ([]Room, error) {
 		var creatorID sql.NullString
 		var signature sql.NullString
 		var lastSeenAtStr sql.NullString
-		if err := rows.Scan(&r.ID, &r.Name, &r.Description, &creatorID, &signature, &createdAtStr, &updatedAtStr, &lastSeenAtStr, &r.Version, &r.AnnounceCount); err != nil {
+		var isHidden bool
+		var isTrusted bool
+		var creatorMuted bool
+		var creatorBlocked bool
+		if err := rows.Scan(&r.ID, &r.Name, &r.Description, &creatorID, &signature, &createdAtStr, &updatedAtStr, &lastSeenAtStr, &r.Version, &r.AnnounceCount, &isHidden, &isTrusted, &creatorMuted, &creatorBlocked); err != nil {
 			return nil, err
 		}
 		if creatorID.Valid {
@@ -501,6 +587,10 @@ func (s *Store) SearchAllRooms(ctx context.Context) ([]Room, error) {
 		if lastSeenAtStr.Valid {
 			r.LastSeenAt, _ = time.Parse(SortableTimeFormat, lastSeenAtStr.String)
 		}
+		r.IsHidden = isHidden
+		r.IsTrusted = isTrusted
+		r.CreatorMuted = creatorMuted
+		r.CreatorBlocked = creatorBlocked
 		rooms = append(rooms, r)
 	}
 	return rooms, rows.Err()
@@ -517,11 +607,17 @@ func (s *Store) GetRoom(ctx context.Context, roomID string) (*Room, error) {
 	var roomKey sql.NullString
 
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, name, description, creator_id, signature, is_private, room_key, created_at, updated_at, last_seen_at, version, announce_count
-		FROM rooms
-		WHERE id = ?
+		SELECT r.id, r.name, r.description, r.creator_id, r.signature, r.is_private, r.room_key, r.created_at, r.updated_at, r.last_seen_at, r.version, r.announce_count,
+		       COALESCE(lrp.is_hidden, 0) as is_hidden,
+		       COALESCE(lrp.is_trusted, 0) as is_trusted,
+		       COALESCE(lpp.is_muted, 0) as creator_muted,
+		       COALESCE(lpp.is_blocked, 0) as creator_blocked
+		FROM rooms r
+		LEFT JOIN local_room_policies lrp ON lrp.room_id = r.id
+		LEFT JOIN local_peer_policies lpp ON lpp.peer_id = r.creator_id
+		WHERE r.id = ?
 	`, roomID).Scan(
-		&r.ID, &r.Name, &r.Description, &creatorID, &signature, &isPrivate, &roomKey, &createdAtStr, &updatedAtStr, &lastSeenAtStr, &r.Version, &r.AnnounceCount,
+		&r.ID, &r.Name, &r.Description, &creatorID, &signature, &isPrivate, &roomKey, &createdAtStr, &updatedAtStr, &lastSeenAtStr, &r.Version, &r.AnnounceCount, &r.IsHidden, &r.IsTrusted, &r.CreatorMuted, &r.CreatorBlocked,
 	)
 	if err != nil {
 		return nil, err
@@ -550,11 +646,19 @@ func (s *Store) GetRoom(ctx context.Context, roomID string) (*Room, error) {
 
 func (s *Store) ListJoinedPublicRooms(ctx context.Context, userID string) ([]Room, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT r.id, r.name, r.description, r.creator_id, r.signature, r.created_at, r.updated_at, r.last_seen_at, r.version, COALESCE(r.announce_count, 0)
+		SELECT r.id, r.name, r.description, r.creator_id, r.signature, r.created_at, r.updated_at, r.last_seen_at, r.version, COALESCE(r.announce_count, 0),
+		       COALESCE(lrp.is_hidden, 0) as is_hidden,
+		       COALESCE(lrp.is_trusted, 0) as is_trusted,
+		       COALESCE(lpp.is_muted, 0) as creator_muted,
+		       COALESCE(lpp.is_blocked, 0) as creator_blocked
 		FROM rooms r
 		JOIN memberships m ON m.room_id = r.id
+		LEFT JOIN local_room_policies lrp ON lrp.room_id = r.id
+		LEFT JOIN local_peer_policies lpp ON lpp.peer_id = r.creator_id
 		WHERE m.user_id = ? AND r.is_private = 0
-		ORDER BY COALESCE(r.last_seen_at, r.created_at) DESC, r.name ASC
+		  AND COALESCE(lrp.is_hidden, 0) = 0
+		  AND COALESCE(lpp.is_blocked, 0) = 0
+		ORDER BY COALESCE(lrp.is_trusted, 0) DESC, COALESCE(r.last_seen_at, r.created_at) DESC, r.name ASC
 	`, userID)
 	if err != nil {
 		return nil, err
@@ -569,7 +673,11 @@ func (s *Store) ListJoinedPublicRooms(ctx context.Context, userID string) ([]Roo
 		var creatorID sql.NullString
 		var signature sql.NullString
 		var lastSeenAtStr sql.NullString
-		if err := rows.Scan(&r.ID, &r.Name, &r.Description, &creatorID, &signature, &createdAtStr, &updatedAtStr, &lastSeenAtStr, &r.Version, &r.AnnounceCount); err != nil {
+		var isHidden bool
+		var isTrusted bool
+		var creatorMuted bool
+		var creatorBlocked bool
+		if err := rows.Scan(&r.ID, &r.Name, &r.Description, &creatorID, &signature, &createdAtStr, &updatedAtStr, &lastSeenAtStr, &r.Version, &r.AnnounceCount, &isHidden, &isTrusted, &creatorMuted, &creatorBlocked); err != nil {
 			return nil, err
 		}
 		if creatorID.Valid {
@@ -585,6 +693,10 @@ func (s *Store) ListJoinedPublicRooms(ctx context.Context, userID string) ([]Roo
 		if lastSeenAtStr.Valid {
 			r.LastSeenAt, _ = time.Parse(SortableTimeFormat, lastSeenAtStr.String)
 		}
+		r.IsHidden = isHidden
+		r.IsTrusted = isTrusted
+		r.CreatorMuted = creatorMuted
+		r.CreatorBlocked = creatorBlocked
 		rooms = append(rooms, r)
 	}
 	return rooms, rows.Err()
@@ -706,6 +818,15 @@ func (s *Store) MarkRoomAsRead(ctx context.Context, userID, roomID string) error
 }
 
 func (s *Store) CreateMessage(ctx context.Context, roomID, authorID, content string) (*Message, error) {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil, fmt.Errorf("message cannot be empty")
+	}
+	contentRunes := []rune(content)
+	if len(contentRunes) > maxMessageContentRunes {
+		content = string(contentRunes[:maxMessageContentRunes])
+	}
+
 	m := &Message{
 		ID:        newID(),
 		RoomID:    roomID,
@@ -713,13 +834,19 @@ func (s *Store) CreateMessage(ctx context.Context, roomID, authorID, content str
 		Content:   content,
 		CreatedAt: time.Now().UTC(),
 	}
+	if err := s.db.QueryRowContext(ctx, `SELECT username FROM users WHERE id = ?`, authorID).Scan(&m.AuthorUsername); err != nil {
+		return nil, err
+	}
 	createdAtStr := m.CreatedAt.Format(SortableTimeFormat)
 
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO messages (id, room_id, author_id, content, created_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, m.ID, m.RoomID, m.AuthorID, m.Content, createdAtStr)
+		INSERT INTO messages (id, room_id, author_id, author_username, content, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, m.ID, m.RoomID, m.AuthorID, m.AuthorUsername, m.Content, createdAtStr)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.enforceRoomMessageLimit(ctx, roomID); err != nil {
 		return nil, err
 	}
 	return m, nil
@@ -762,13 +889,47 @@ func (s *Store) SyncMessage(ctx context.Context, m *Message) error {
 	}
 }
 
+func MaxMessageContentRunes() int {
+	return maxMessageContentRunes
+}
+
+func PublicRoomMetadataUpdateCooldown() time.Duration {
+	return publicRoomMetadataUpdateCooldown
+}
+
+func (s *Store) enforceRoomMessageLimit(ctx context.Context, roomID string) error {
+	var isPrivate bool
+	if err := s.db.QueryRowContext(ctx, `SELECT is_private FROM rooms WHERE id = ?`, roomID).Scan(&isPrivate); err != nil {
+		return err
+	}
+
+	limit := maxStoredMessagesPerPublicRoom
+	if isPrivate {
+		limit = maxStoredMessagesPerPrivateRoom
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM messages
+		WHERE id IN (
+			SELECT id
+			FROM messages
+			WHERE room_id = ?
+			ORDER BY created_at DESC
+			LIMIT -1 OFFSET ?
+		)
+	`, roomID, limit)
+	return err
+}
+
 func (s *Store) ListMessages(ctx context.Context, roomID string, limit int) ([]FeedMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT m.id, m.room_id, m.author_id, m.content, m.created_at, r.name, u.username
+		SELECT m.id, m.room_id, m.author_id, m.author_username, m.content, m.created_at, r.name
 		FROM messages m
 		JOIN rooms r ON r.id = m.room_id
-		JOIN users u ON u.id = m.author_id
+		LEFT JOIN local_peer_policies lpp ON lpp.peer_id = m.author_id
 		WHERE m.room_id = ?
+		  AND COALESCE(lpp.is_blocked, 0) = 0
+		  AND COALESCE(lpp.is_muted, 0) = 0
 		ORDER BY m.created_at DESC
 		LIMIT ?
 	`, roomID, limit)
@@ -781,7 +942,7 @@ func (s *Store) ListMessages(ctx context.Context, roomID string, limit int) ([]F
 	for rows.Next() {
 		var fm FeedMessage
 		var createdAtStr string
-		if err := rows.Scan(&fm.ID, &fm.RoomID, &fm.AuthorID, &fm.Content, &createdAtStr, &fm.RoomName, &fm.AuthorUsername); err != nil {
+		if err := rows.Scan(&fm.ID, &fm.RoomID, &fm.AuthorID, &fm.AuthorUsername, &fm.Content, &createdAtStr, &fm.RoomName); err != nil {
 			return nil, err
 		}
 		fm.CreatedAt, _ = time.Parse(SortableTimeFormat, createdAtStr)
@@ -794,4 +955,60 @@ func (s *Store) ListMessages(ctx context.Context, roomID string, limit int) ([]F
 	}
 
 	return messages, rows.Err()
+}
+
+func (s *Store) SetRoomHidden(ctx context.Context, roomID string, hidden bool) error {
+	return s.upsertRoomPolicy(ctx, roomID, "is_hidden", hidden)
+}
+
+func (s *Store) SetRoomTrusted(ctx context.Context, roomID string, trusted bool) error {
+	return s.upsertRoomPolicy(ctx, roomID, "is_trusted", trusted)
+}
+
+func (s *Store) SetPeerMuted(ctx context.Context, peerID string, muted bool) error {
+	return s.upsertPeerPolicy(ctx, peerID, "is_muted", muted)
+}
+
+func (s *Store) SetPeerBlocked(ctx context.Context, peerID string, blocked bool) error {
+	return s.upsertPeerPolicy(ctx, peerID, "is_blocked", blocked)
+}
+
+func (s *Store) upsertRoomPolicy(ctx context.Context, roomID, column string, value bool) error {
+	if roomID == "" {
+		return fmt.Errorf("room id required")
+	}
+	if column != "is_hidden" && column != "is_trusted" {
+		return fmt.Errorf("unsupported room policy column")
+	}
+
+	now := time.Now().UTC().Format(SortableTimeFormat)
+	query := fmt.Sprintf(`
+		INSERT INTO local_room_policies (room_id, %s, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(room_id) DO UPDATE SET
+			%s = excluded.%s,
+			updated_at = excluded.updated_at
+	`, column, column, column)
+	_, err := s.db.ExecContext(ctx, query, roomID, value, now)
+	return err
+}
+
+func (s *Store) upsertPeerPolicy(ctx context.Context, peerID, column string, value bool) error {
+	if peerID == "" {
+		return fmt.Errorf("peer id required")
+	}
+	if column != "is_muted" && column != "is_blocked" {
+		return fmt.Errorf("unsupported peer policy column")
+	}
+
+	now := time.Now().UTC().Format(SortableTimeFormat)
+	query := fmt.Sprintf(`
+		INSERT INTO local_peer_policies (peer_id, %s, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(peer_id) DO UPDATE SET
+			%s = excluded.%s,
+			updated_at = excluded.updated_at
+	`, column, column, column)
+	_, err := s.db.ExecContext(ctx, query, peerID, value, now)
+	return err
 }

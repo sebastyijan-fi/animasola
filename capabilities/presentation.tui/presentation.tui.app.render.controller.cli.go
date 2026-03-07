@@ -17,6 +17,7 @@ import (
 	keys "github.com/sebastyijan/animasola/capabilities/identity.keys"
 	discovery "github.com/sebastyijan/animasola/capabilities/network.discovery"
 	http "github.com/sebastyijan/animasola/capabilities/network.http"
+	registry "github.com/sebastyijan/animasola/capabilities/network.registry"
 	p2p "github.com/sebastyijan/animasola/capabilities/network.p2p"
 	telemetry "github.com/sebastyijan/animasola/capabilities/network.telemetry"
 	tor "github.com/sebastyijan/animasola/capabilities/network.tor"
@@ -29,6 +30,7 @@ type AppModel struct {
 	keys       *keys.Keys
 	torConfig  *tor.Config
 	torProcess *tor.Runner
+	registry   *registry.Client
 	node       *p2p.Node
 	discovery  *discovery.Service
 
@@ -50,18 +52,19 @@ type AppModel struct {
 	telemetryFeed   chan telemetry.TelemetryEvent
 }
 
-func NewAppModel(s *sqlite.Store, u *sqlite.User, keys *keys.Keys, torConfig *tor.Config, torProcess *tor.Runner, torStartTime time.Time, torProgressCh <-chan string, appVersion string) *AppModel {
+func NewAppModel(s *sqlite.Store, u *sqlite.User, keys *keys.Keys, torConfig *tor.Config, torProcess *tor.Runner, torStartTime time.Time, torProgressCh <-chan string, appVersion string, registryClient *registry.Client) *AppModel {
 	m := &AppModel{
 		sqlite:       s,
 		user:         u,
 		keys:         keys,
 		torConfig:    torConfig,
 		torProcess:   torProcess,
+		registry:     registryClient,
 		node:         nil,      // We don't have a node yet!
 		currentView:  "splash", // Boot into Tor waitscreen by default
 		splashView:   NewTorSplashModel(torProgressCh),
 		setupView:    NewSetupModel(),
-		homeView:     NewHomeModel(s, u, nil, nil), // Passed as nil initially
+		homeView:     NewHomeModel(s, u, keys, nil, nil, registryClient), // Passed as nil initially
 		roomView:     NewRoomModel(s, u, nil, nil), // Passed as nil initially
 		appVersion:   appVersion,
 		torStartTime: torStartTime,
@@ -160,7 +163,7 @@ func (m *AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.node = node
 
 		// 3. Inject the active node into the UI panels
-		m.discovery = discovery.NewService(node, m.sqlite, m.user)
+		m.discovery = discovery.NewService(node, m.sqlite, m.user, m.registry)
 		m.homeView.SetNode(node)
 		m.homeView.SetDiscovery(m.discovery)
 		m.roomView.SetNode(node)

@@ -12,6 +12,7 @@ import (
 
 	version "github.com/sebastyijan/animasola/capabilities/core.version"
 	keys "github.com/sebastyijan/animasola/capabilities/identity.keys"
+	registry "github.com/sebastyijan/animasola/capabilities/network.registry"
 	telemetry "github.com/sebastyijan/animasola/capabilities/network.telemetry"
 	tor "github.com/sebastyijan/animasola/capabilities/network.tor"
 	sqlite "github.com/sebastyijan/animasola/capabilities/storage.sqlite"
@@ -26,6 +27,7 @@ type AppBootstrappedMsg struct {
 	ProgressCh   <-chan string
 	TorStartTime time.Time
 	Version      string
+	Registry     *registry.Client
 }
 
 type BootstrapErrMsg struct {
@@ -119,7 +121,7 @@ func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case AppBootstrappedMsg:
 		m.store = msg.Store
 		m.torRunner = msg.TorRunner
-		m.appView = NewAppModel(msg.Store, msg.User, msg.Keys, msg.TorConfig, msg.TorRunner, msg.TorStartTime, msg.ProgressCh, msg.Version)
+		m.appView = NewAppModel(msg.Store, msg.User, msg.Keys, msg.TorConfig, msg.TorRunner, msg.TorStartTime, msg.ProgressCh, msg.Version, msg.Registry)
 
 		// Pass the existing dimensions so AppModel can cascade them
 		if m.width > 0 && m.height > 0 {
@@ -130,8 +132,10 @@ func (m *RootModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.appView.Init()
 
 	case BootstrapErrMsg:
-		m.err = msg.Err
-		return m, nil
+		m.profileView.SetError(msg.Err)
+		m.state = "profile"
+		m.err = nil
+		return m, m.profileView.Init()
 	}
 
 	switch m.state {
@@ -175,11 +179,31 @@ func (m *RootModel) View() string {
 
 func (m *RootModel) bootstrapAppCmd(username string) tea.Cmd {
 	return func() tea.Msg {
+		registryClient := registry.NewClient()
 		configRoot, err := os.UserConfigDir()
 		if err != nil {
 			return BootstrapErrMsg{fmt.Errorf("error getting config directory: %w", err)}
 		}
 		configDir := filepath.Join(configRoot, "animasola", username)
+		hadLocalKey := keys.HasKey(username)
+
+		keys, err := keys.GetOrGenerateKey(username)
+		if err != nil {
+			return BootstrapErrMsg{fmt.Errorf("error loading identity: %w", err)}
+		}
+
+		hostID, err := keys.PeerID()
+		if err != nil {
+			return BootstrapErrMsg{fmt.Errorf("error generating peer ID for database mapping: %w", err)}
+		}
+
+		if err := registryClient.RegisterProfile(m.ctx, keys, username, hostID); err != nil {
+			if !hadLocalKey {
+				_ = os.RemoveAll(configDir)
+			}
+			return BootstrapErrMsg{err}
+		}
+
 		if err := os.MkdirAll(configDir, 0700); err != nil {
 			return BootstrapErrMsg{fmt.Errorf("error creating config directory: %w", err)}
 		}
@@ -195,16 +219,6 @@ func (m *RootModel) bootstrapAppCmd(username string) tea.Cmd {
 		}
 
 		st.StartDataPruning(m.ctx, 30*24*time.Hour)
-
-		keys, err := keys.GetOrGenerateKey(username)
-		if err != nil {
-			return BootstrapErrMsg{fmt.Errorf("error loading identity: %w", err)}
-		}
-
-		hostID, err := keys.PeerID()
-		if err != nil {
-			return BootstrapErrMsg{fmt.Errorf("error generating peer ID for database mapping: %w", err)}
-		}
 
 		user, err := st.GetOrCreateUser(m.ctx, username, hostID)
 		if err != nil {
@@ -242,6 +256,7 @@ func (m *RootModel) bootstrapAppCmd(username string) tea.Cmd {
 			ProgressCh:   progressCh,
 			TorStartTime: time.Now(), // Fallback if `torStartTime` from RootModel isn't accessible here
 			Version:      version.Current,
+			Registry:     registryClient,
 		}
 	}
 }

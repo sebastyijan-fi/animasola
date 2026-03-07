@@ -12,7 +12,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	keys "github.com/sebastyijan/animasola/capabilities/identity.keys"
 	discovery "github.com/sebastyijan/animasola/capabilities/network.discovery"
+	registry "github.com/sebastyijan/animasola/capabilities/network.registry"
 	p2p "github.com/sebastyijan/animasola/capabilities/network.p2p"
 	sqlite "github.com/sebastyijan/animasola/capabilities/storage.sqlite"
 )
@@ -51,11 +53,17 @@ func clearToastCmd() tea.Cmd {
 	})
 }
 
+type roomPolicyUpdatedMsg struct {
+	err error
+}
+
 type HomeModel struct {
 	sqlite *sqlite.Store
 	user   *sqlite.User
+	keys   *keys.Keys
 	node   *p2p.Node
 	disco  *discovery.Service
+	registry *registry.Client
 
 	width  int
 	height int
@@ -82,7 +90,7 @@ type HomeModel struct {
 	updateVersion     string
 }
 
-func NewHomeModel(s *sqlite.Store, u *sqlite.User, n *p2p.Node, d *discovery.Service) *HomeModel {
+func NewHomeModel(s *sqlite.Store, u *sqlite.User, identity *keys.Keys, n *p2p.Node, d *discovery.Service, registryClient *registry.Client) *HomeModel {
 	ti := textinput.New()
 	ti.Placeholder = "New room name..."
 	ti.CharLimit = 32
@@ -110,8 +118,10 @@ func NewHomeModel(s *sqlite.Store, u *sqlite.User, n *p2p.Node, d *discovery.Ser
 	return &HomeModel{
 		sqlite:            s,
 		user:              u,
+		keys:              identity,
 		node:              n,
 		disco:             d,
+		registry:          registryClient,
 		mode:              "pinned",
 		roomNameInput:     ti,
 		roomPasswordInput: pi,
@@ -166,6 +176,49 @@ func (m *HomeModel) FetchRooms() tea.Cmd {
 	}
 }
 
+func filterSearchVisiblePublicRooms(rooms []sqlite.Room, rawQuery string) []sqlite.Room {
+	query := strings.ToLower(strings.TrimSpace(rawQuery))
+	if query == "" {
+		return nil
+	}
+
+	filtered := make([]sqlite.Room, 0, min(len(rooms), 20))
+	for _, r := range rooms {
+		if strings.Contains(strings.ToLower(r.Name), query) {
+			filtered = append(filtered, r)
+			if len(filtered) == 20 {
+				break
+			}
+		}
+	}
+
+	return filtered
+}
+
+func (m *HomeModel) setRoomHidden(roomID string, hidden bool) tea.Cmd {
+	return func() tea.Msg {
+		return roomPolicyUpdatedMsg{err: m.sqlite.SetRoomHidden(context.Background(), roomID, hidden)}
+	}
+}
+
+func (m *HomeModel) setRoomTrusted(roomID string, trusted bool) tea.Cmd {
+	return func() tea.Msg {
+		return roomPolicyUpdatedMsg{err: m.sqlite.SetRoomTrusted(context.Background(), roomID, trusted)}
+	}
+}
+
+func (m *HomeModel) setPeerMuted(peerID string, muted bool) tea.Cmd {
+	return func() tea.Msg {
+		return roomPolicyUpdatedMsg{err: m.sqlite.SetPeerMuted(context.Background(), peerID, muted)}
+	}
+}
+
+func (m *HomeModel) setPeerBlocked(peerID string, blocked bool) tea.Cmd {
+	return func() tea.Msg {
+		return roomPolicyUpdatedMsg{err: m.sqlite.SetPeerBlocked(context.Background(), peerID, blocked)}
+	}
+}
+
 func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
@@ -179,6 +232,15 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.copiedToast = false
 		return m, nil
 
+	case roomPolicyUpdatedMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		m.showingInfo = false
+		m.copiedToast = false
+		return m, m.FetchRooms()
+
 	case error:
 		m.err = msg
 		m.processing = false
@@ -189,16 +251,7 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case RoomsLoadedMsg:
 		if m.mode == "search" {
 			m.allPublicRooms = []sqlite.Room(msg)
-
-			// Re-apply filter immediately
-			query := strings.ToLower(strings.TrimSpace(m.searchInput.Value()))
-			var filtered []sqlite.Room
-			for _, r := range m.allPublicRooms {
-				if query == "" || strings.Contains(strings.ToLower(r.Name), query) {
-					filtered = append(filtered, r)
-				}
-			}
-			m.rooms = filtered
+			m.rooms = filterSearchVisiblePublicRooms(m.allPublicRooms, m.searchInput.Value())
 		} else {
 			m.rooms = []sqlite.Room(msg)
 		}
@@ -231,15 +284,7 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			if m.mode == "search" {
-				// Re-apply filter immediately so it pops up visually for the user
-				query := strings.ToLower(strings.TrimSpace(m.searchInput.Value()))
-				var filtered []sqlite.Room
-				for _, r := range m.allPublicRooms {
-					if query == "" || strings.Contains(strings.ToLower(r.Name), query) {
-						filtered = append(filtered, r)
-					}
-				}
-				m.rooms = filtered
+				m.rooms = filterSearchVisiblePublicRooms(m.allPublicRooms, m.searchInput.Value())
 			}
 		}
 
@@ -263,6 +308,18 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					isOwner, err := m.sqlite.IsRoomOwner(context.Background(), m.user.ID, r.ID)
 					if err == nil {
 						if isOwner {
+							if !r.IsPrivate && r.CreatorID == m.user.ID {
+								if m.registry == nil {
+									m.err = fmt.Errorf("public room deletion requires a live registry connection")
+									m.confirmingDelete = false
+									return m, nil
+								}
+								if err := m.registry.ReleasePublicRoom(context.Background(), m.keys, m.user.ID, r.ID); err != nil {
+									m.err = err
+									m.confirmingDelete = false
+									return m, nil
+								}
+							}
 							_ = m.sqlite.DeleteRoom(context.Background(), r.ID)
 						} else {
 							_ = m.sqlite.LeaveRoom(context.Background(), m.user.ID, r.ID)
@@ -285,6 +342,28 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, clearToastCmd())
 				}
 				return m, tea.Batch(cmds...)
+			case "h", "H":
+				if len(m.rooms) > 0 && m.index < len(m.rooms) {
+					return m, m.setRoomHidden(m.rooms[m.index].ID, !m.rooms[m.index].IsHidden)
+				}
+			case "t", "T":
+				if len(m.rooms) > 0 && m.index < len(m.rooms) {
+					return m, m.setRoomTrusted(m.rooms[m.index].ID, !m.rooms[m.index].IsTrusted)
+				}
+			case "m", "M":
+				if len(m.rooms) > 0 && m.index < len(m.rooms) {
+					r := m.rooms[m.index]
+					if r.CreatorID != "" && r.CreatorID != m.user.ID {
+						return m, m.setPeerMuted(r.CreatorID, !r.CreatorMuted)
+					}
+				}
+			case "b", "B":
+				if len(m.rooms) > 0 && m.index < len(m.rooms) {
+					r := m.rooms[m.index]
+					if r.CreatorID != "" && r.CreatorID != m.user.ID {
+						return m, m.setPeerBlocked(r.CreatorID, !r.CreatorBlocked)
+					}
+				}
 			case "esc", "i", "enter":
 				m.showingInfo = false
 			}
@@ -425,13 +504,7 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if query != oldQuery {
 					m.index = 0
 				}
-				var filtered []sqlite.Room
-				for _, r := range m.allPublicRooms {
-					if query == "" || strings.Contains(strings.ToLower(r.Name), query) {
-						filtered = append(filtered, r)
-					}
-				}
-				m.rooms = filtered
+				m.rooms = filterSearchVisiblePublicRooms(m.allPublicRooms, query)
 				if m.index >= len(m.rooms) {
 					m.index = max(0, len(m.rooms)-1)
 				}
@@ -523,9 +596,18 @@ func (m *HomeModel) createRoom(name, password string) tea.Cmd {
 	return func() tea.Msg {
 		isPrivate := password != ""
 		startTime := time.Now()
+		if !isPrivate && m.registry == nil {
+			return fmt.Errorf("public rooms require a live registry connection")
+		}
 		r, err := m.sqlite.CreateRoom(context.Background(), name, "", m.user.ID, isPrivate, "")
 		if err != nil {
 			return err
+		}
+		if !isPrivate {
+			if err := m.registry.RegisterPublicRoom(context.Background(), m.keys, m.user.Username, m.user.ID, r.ID, r.Name); err != nil {
+				_ = m.sqlite.DeleteRoom(context.Background(), r.ID)
+				return err
+			}
 		}
 		if isPrivate {
 			r.RoomKey = sqlite.EncodePrivateRoomKey(r.ID, password)
@@ -680,7 +762,11 @@ func (m *HomeModel) View() string {
 		if m.mode == "pinned" {
 			s.WriteString("You haven't joined any rooms. Press 's' to search or 'c' to create.\n")
 		} else {
-			s.WriteString("No public rooms found matching your search. Press enter to attempt direct connection.\n")
+			if strings.TrimSpace(m.searchInput.Value()) == "" {
+				s.WriteString("Type a room name to search the public network. Press enter to try an exact room name.\n")
+			} else {
+				s.WriteString("No public rooms found matching your search. Press enter to attempt direct connection.\n")
+			}
 		}
 	} else {
 		for i, r := range m.rooms {
@@ -755,11 +841,49 @@ func (m *HomeModel) View() string {
 			}
 
 			box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1, 2)
+			creatorText = "Joined room"
+			isOwner, err = m.sqlite.IsRoomOwner(context.Background(), m.user.ID, r.ID)
+			if err == nil {
+				if isOwner {
+					creatorText = "You created this room"
+				} else {
+					creatorText = "You joined this room"
+				}
+			}
+
+			statuses := make([]string, 0, 4)
+			if r.IsTrusted {
+				statuses = append(statuses, "Trusted")
+			}
+			if r.IsHidden {
+				statuses = append(statuses, "Hidden from public discovery")
+			}
+			if r.CreatorMuted {
+				statuses = append(statuses, "Creator muted")
+			}
+			if r.CreatorBlocked {
+				statuses = append(statuses, "Creator blocked")
+			}
+
 			content := fmt.Sprintf("Room Details: %s\n\n%s\n%s\n\nInvitation ID (Share exactly):\n%s\n",
 				lipgloss.NewStyle().Bold(true).Render(r.Name),
 				lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(roomType),
 				lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(creatorText),
 				r.ID)
+
+			if len(statuses) > 0 {
+				content += "\nLocal filters:\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(strings.Join(statuses, " • ")) + "\n"
+			}
+
+			actions := []string{
+				"[h] Hide/Unhide from public discovery",
+				"[t] Trust/Untrust room",
+			}
+			if r.CreatorID != "" && r.CreatorID != m.user.ID {
+				actions = append(actions, "[m] Mute/Unmute creator")
+				actions = append(actions, "[b] Block/Unblock creator")
+			}
+			content += "\n" + strings.Join(actions, "\n")
 
 			if m.copiedToast {
 				content += "\n  " + lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true).Render("(ID Copied to Clipboard!)")
@@ -769,7 +893,7 @@ func (m *HomeModel) View() string {
 			s.WriteString(box.Render(content))
 		}
 	} else if m.mode == "search" {
-		s.WriteString("up/down (or tab): Navigate • esc: Back to Pinned • enter: Join selected (or exact name)")
+		s.WriteString("type: Search • up/down (or tab): Navigate • esc: Back to Pinned • enter: Join selected (or exact name)")
 	} else {
 		s.WriteString("j/k: Navigate • enter: Open • s: Search • c: Create • p: Join by ID • i: Room Info • x: Delete/Leave • q: Quit")
 	}
@@ -779,6 +903,13 @@ func (m *HomeModel) View() string {
 
 func max(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b
