@@ -112,6 +112,15 @@ Status values:
   - room message send path
   - room error propagation back to app/home
 
+2. `Attack lab no longer reflects the live registry model for multi-profile scenarios`
+- Several hostile scenarios now fail at profile registration before they reach the message/discovery behavior they were originally written to test.
+- This is because the live control plane now enforces:
+  - per-source registration attempt limits
+  - active profile caps
+  - issuance cooldowns
+- Status: `OPEN`
+- This is a test harness gap, not a product security regression.
+
 ### Recently fixed
 
 1. `Fresh nodes could not discover public rooms`
@@ -123,6 +132,10 @@ Status values:
 2. `Home showed stale generic identity-derivation status`
 - Cause: overlapping Home booleans and generic processing copy.
 - Fix: derived panel state + action-specific busy text.
+
+3. `Selecting a room from search opened an ephemeral result`
+- Cause: registry-backed search results were not persisted locally before opening.
+- Fix: search selection now materializes the room locally before open.
 
 ## 11. Next execution order
 

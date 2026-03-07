@@ -275,7 +275,7 @@ func (s *Store) EnsurePublicRoomExists(ctx context.Context, id, name, desc, crea
 	return err
 }
 
-func (s *Store) JoinExternalRoom(ctx context.Context, roomID, name, userID string, isPrivate bool, roomKey string) (*Room, error) {
+func (s *Store) JoinExternalRoom(ctx context.Context, roomID, name, userID, creatorID string, isPrivate bool, roomKey string) (*Room, error) {
 	// If the room already exists locally, just make sure the user is joined
 	var exists int
 	if err := s.db.QueryRowContext(ctx, "SELECT 1 FROM rooms WHERE id = ?", roomID).Scan(&exists); err == nil {
@@ -323,13 +323,16 @@ func (s *Store) JoinExternalRoom(ctx context.Context, roomID, name, userID strin
 		ID:          roomID,
 		Name:        name,
 		Description: "External Room",
-		CreatorID:   userID,
+		CreatorID:   creatorID,
 		IsPrivate:   isPrivate,
 		RoomKey:     roomKey,
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
 		LastSeenAt:  time.Now().UTC(),
 		Version:     1,
+	}
+	if strings.TrimSpace(r.CreatorID) == "" {
+		r.CreatorID = userID
 	}
 	createdAtStr := r.CreatedAt.Format(SortableTimeFormat)
 	updatedAtStr := r.UpdatedAt.Format(SortableTimeFormat)

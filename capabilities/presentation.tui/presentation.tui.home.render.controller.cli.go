@@ -29,6 +29,11 @@ type OpenRoomMsg struct {
 
 type RoomsLoadedMsg []sqlite.Room
 
+type SearchRoomsLoadedMsg struct {
+	Query string
+	Rooms []sqlite.Room
+}
+
 type RoomCreatedNeedsSyncMsg struct{ Room *sqlite.Room }
 
 type RoomJoinNeedsSyncMsg struct {
@@ -208,16 +213,9 @@ func (m *HomeModel) FetchRooms() tea.Cmd {
 		var err error
 
 		if m.mode == "search" {
-			if m.disco != nil {
-				go func() {
-					reqCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					defer cancel()
-					_ = m.disco.RequestSnapshot(reqCtx)
-				}()
-			}
 			query := strings.TrimSpace(m.searchInput.Value())
 			if query == "" {
-				return RoomsLoadedMsg(nil)
+				return SearchRoomsLoadedMsg{Query: query, Rooms: nil}
 			}
 			if m.registry != nil {
 				registryRooms, registryErr := m.registry.SearchPublicRooms(context.Background(), query)
@@ -231,13 +229,14 @@ func (m *HomeModel) FetchRooms() tea.Cmd {
 							IsPrivate: false,
 						})
 					}
-					return RoomsLoadedMsg(rooms)
+					return SearchRoomsLoadedMsg{Query: query, Rooms: rooms}
 				}
-				err = registryErr
 			}
-			if err == nil {
-				rooms, err = m.sqlite.SearchAllRooms(context.Background())
+			rooms, err = m.sqlite.SearchAllRooms(context.Background())
+			if err != nil {
+				return err
 			}
+			return SearchRoomsLoadedMsg{Query: query, Rooms: filterSearchVisiblePublicRooms(rooms, query)}
 		} else {
 			rooms, err = m.sqlite.ListRooms(context.Background(), m.user.ID)
 		}
@@ -330,6 +329,16 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rooms = []sqlite.Room(msg)
 		}
 
+		if m.index >= len(m.rooms) {
+			m.index = max(0, len(m.rooms)-1)
+		}
+
+	case SearchRoomsLoadedMsg:
+		currentQuery := strings.TrimSpace(m.searchInput.Value())
+		if m.mode != "search" || strings.TrimSpace(msg.Query) != currentQuery {
+			return m, nil
+		}
+		m.rooms = msg.Rooms
 		if m.index >= len(m.rooms) {
 			m.index = max(0, len(m.rooms)-1)
 		}
@@ -552,7 +561,7 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// If we have a selected room, join it!
 				if len(m.rooms) > 0 && m.index < len(m.rooms) {
 					r := m.rooms[m.index]
-					if _, err := m.sqlite.JoinExternalRoom(context.Background(), r.ID, r.Name, m.user.ID, r.IsPrivate, r.RoomKey); err != nil {
+					if _, err := m.sqlite.JoinExternalRoom(context.Background(), r.ID, r.Name, m.user.ID, r.CreatorID, r.IsPrivate, r.RoomKey); err != nil {
 						m.err = err
 						return m, nil
 					}
@@ -587,9 +596,6 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if query != oldQuery {
 					m.index = 0
 					cmds = append(cmds, m.FetchRooms())
-				}
-				if m.registry == nil {
-					m.rooms = filterSearchVisiblePublicRooms(m.allPublicRooms, query)
 				}
 				if m.index >= len(m.rooms) {
 					m.index = max(0, len(m.rooms)-1)
@@ -767,7 +773,7 @@ func (m *HomeModel) joinRoomByID(id, password string) tea.Cmd {
 		if isPrivate {
 			storedRoomKey = sqlite.EncodePrivateRoomKey(id, password)
 		}
-		r, err := m.sqlite.JoinExternalRoom(context.Background(), id, "Remote Room", m.user.ID, isPrivate, storedRoomKey)
+		r, err := m.sqlite.JoinExternalRoom(context.Background(), id, "Remote Room", m.user.ID, "", isPrivate, storedRoomKey)
 		if err != nil {
 			return err
 		}
