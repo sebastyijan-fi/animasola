@@ -93,11 +93,7 @@ To remove the installed app files:
 ```bash
 animasola uninstall
 ```
-
-To also remove your local profiles, database, and config:
-```bash
-animasola uninstall --purge
-```
+This removes the app, local profiles, database, and config so the machine is clean again.
 
 If you are coming from a much older alpha build, Animasola may decide that your old local database is not compatible anymore. In that case, it will archive/reset the old database instead of crashing. That keeps the app usable, but it can mean old local chat history does not carry forward from broken alpha-era data.
 
