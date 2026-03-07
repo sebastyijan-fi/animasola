@@ -40,6 +40,11 @@ const (
 
 var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{3,32}$`)
 
+func isReservedUsername(username string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(username))
+	return strings.HasPrefix(normalized, "attack-") || strings.HasPrefix(normalized, "attack_")
+}
+
 type apiError struct {
 	Code  string `json:"code"`
 	Error string `json:"error"`
@@ -336,6 +341,11 @@ func (s *server) handleRegisterProfile(w http.ResponseWriter, r *http.Request) {
 	if !usernamePattern.MatchString(req.Username) {
 		s.recordSecurityCounter(r.Context(), clientKey(r), "profile_invalid_username")
 		writeJSONError(w, http.StatusBadRequest, "invalid_username", "profile name must be 3-32 characters using letters, numbers, underscore, or hyphen")
+		return
+	}
+	if isReservedUsername(req.Username) {
+		s.recordSecurityCounter(r.Context(), clientKey(r), "profile_reserved_username")
+		writeJSONError(w, http.StatusBadRequest, "invalid_username", "that profile name is reserved")
 		return
 	}
 	if req.PeerID == "" {

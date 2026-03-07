@@ -71,6 +71,13 @@ type scenarioResult struct {
 }
 
 func main() {
+	cleanupEnv, err := isolateAttackLabEnvironment()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to isolate attack lab environment: %v\n", err)
+		os.Exit(1)
+	}
+	defer cleanupEnv()
+
 	var scenarioCSV string
 	var transport string
 	flag.StringVar(&scenarioCSV, "scenarios", "spoofed-discovery,snapshot-flood,spoofed-chat,message-flood,multi-sender-flood,metadata-churn-flood,duplicate-display-name,username-rewrite,public-room-spam,private-room-spam,sybil-room-flood", "Comma-separated scenarios to run")
@@ -112,6 +119,33 @@ func main() {
 	if failed {
 		os.Exit(1)
 	}
+}
+
+func isolateAttackLabEnvironment() (func(), error) {
+	root, err := os.MkdirTemp("", "animasola-attack-lab-")
+	if err != nil {
+		return nil, err
+	}
+
+	configRoot := filepath.Join(root, "config")
+	dataRoot := filepath.Join(root, "data")
+	cacheRoot := filepath.Join(root, "cache")
+	homeRoot := filepath.Join(root, "home")
+	for _, dir := range []string{configRoot, dataRoot, cacheRoot, homeRoot} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			_ = os.RemoveAll(root)
+			return nil, err
+		}
+	}
+
+	_ = os.Setenv("HOME", homeRoot)
+	_ = os.Setenv("XDG_CONFIG_HOME", configRoot)
+	_ = os.Setenv("XDG_DATA_HOME", dataRoot)
+	_ = os.Setenv("XDG_CACHE_HOME", cacheRoot)
+
+	return func() {
+		_ = os.RemoveAll(root)
+	}, nil
 }
 
 func newLab(parent context.Context, transport string) (*lab, error) {
@@ -1221,7 +1255,7 @@ func (r *runtimeNode) createPrivateRoom(name, password string) (*sqlite.Room, er
 }
 
 func (r *runtimeNode) joinPublicRoom(roomID, roomName string) (*p2p.Room, error) {
-	_, err := r.store.JoinExternalRoom(context.Background(), roomID, roomName, r.user.ID, false, "")
+	_, err := r.store.JoinExternalRoom(context.Background(), roomID, roomName, r.user.ID, "", false, "")
 	if err != nil {
 		return nil, err
 	}

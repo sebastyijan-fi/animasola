@@ -344,7 +344,7 @@ func (m *RoomModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // AppModel intercepts this, but we keep it here to prevent it going downward
 		}
 		switch msg.String() {
-		case "e":
+		case "ctrl+e":
 			if !m.isPrivate && m.disco != nil && m.sqlite != nil {
 				isOwner, err := m.sqlite.IsRoomOwner(context.Background(), m.user.ID, m.roomID)
 				if err == nil && isOwner {
@@ -455,7 +455,7 @@ func (m *RoomModel) View() string {
 	metaStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	footer := "(esc to return Home)"
 	if !m.isPrivate {
-		footer = "(e to edit public room metadata, esc to return Home)"
+		footer = "(ctrl+e to edit public room, esc to return Home)"
 	}
 	s.WriteString("\n" + metaStyle.Render(footer))
 
