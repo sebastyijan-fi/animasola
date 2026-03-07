@@ -168,7 +168,7 @@ func (m *RootModel) View() string {
 	case "profile":
 		return m.profileView.View()
 	case "bootstrapping":
-		bootContent := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render("Provisioning Secure Local Environment...")
+		bootContent := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render("Getting things ready...")
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, bootContent)
 	case "app":
 		return m.appView.View()

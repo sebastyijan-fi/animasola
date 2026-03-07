@@ -182,11 +182,11 @@ func (m *ProfileModel) View() string {
 	styleNormal := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	styleError := lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
 
-	s.WriteString(styleHeader.Render("🔮 Select Cryptographic Identity"))
+	s.WriteString(styleHeader.Render("Choose your name"))
 	s.WriteString("\n\n")
 
 	if m.creatingNew {
-		s.WriteString("Create New Profile:\n\n")
+		s.WriteString("Choose a name to get started.\n\n")
 		if m.errText != "" {
 			s.WriteString(styleError.Render(m.errText) + "\n\n")
 		}

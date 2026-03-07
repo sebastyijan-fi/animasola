@@ -89,25 +89,25 @@ func (m *SetupModel) View() string {
 		s.WriteString(titleStyle.Render("Welcome to Animasola"))
 		s.WriteString("\n")
 
-		desc := `To join the peer-to-peer network, you need a cryptographic keys.`
+		desc := `To get started, Animasola needs to create your secure profile on this device.`
 		s.WriteString(textStyle.Render(desc) + "\n\n")
 
-		s.WriteString(warningStyle.Render("We will never touch or read your system SSH keys (~/.ssh).") + "\n\n")
+		s.WriteString(warningStyle.Render("Animasola only creates its own files and does not use your other keys.") + "\n\n")
 
-		safeDesc := fmt.Sprintf("Animasola will generate an isolated Ed25519 keypair and securely store it in your config directory:\n%s", highlightStyle.Render("$XDG_CONFIG_HOME/animasola/<profile>/id_ed25519"))
+		safeDesc := fmt.Sprintf("Your profile will be stored here:\n%s", highlightStyle.Render("$XDG_CONFIG_HOME/animasola/<profile>/id_ed25519"))
 		s.WriteString(textStyle.Render(safeDesc) + "\n\n")
 
-		s.WriteString(textStyle.Render("Do you consent to generating this application-specific key?"))
+		s.WriteString(textStyle.Render("Continue to create your profile."))
 		s.WriteString("\n\n")
-		s.WriteString(lipgloss.NewStyle().Bold(true).Render("[Press ENTER to Generate] • [Press 'q' to Abort]"))
+		s.WriteString(lipgloss.NewStyle().Bold(true).Render("[Press ENTER to Continue] • [Press 'q' to Cancel]"))
 
 	case "generating":
-		s.WriteString(titleStyle.Render("Generating Identity..."))
+		s.WriteString(titleStyle.Render("Creating your profile..."))
 		s.WriteString("\n")
-		s.WriteString(textStyle.Render("Please wait while your cryptographic keys are forged."))
+		s.WriteString(textStyle.Render("This takes a moment the first time."))
 
 	case "error":
-		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true).Render("Error Generating Key"))
+		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true).Render("Couldn’t create your profile"))
 		s.WriteString("\n\n")
 		s.WriteString(textStyle.Render(m.err.Error()))
 		s.WriteString("\n\n(Press ctrl+c to exit)")

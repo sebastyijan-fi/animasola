@@ -32,18 +32,18 @@ func NewTorSplashModel(ch <-chan string) *TorSplashModel {
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
 	tips := []string{
-		"Starting Animasola's private network runtime...",
-		"Tip: Animasola includes Tor internally, so you do not need to manage it yourself.",
-		"Fact: Animasola enforces Argon2id to protect Private Rooms from dictionary attacks.",
-		"Fact: Because Animasola is decentralized, your IP address is not sent to a central chat server.",
-		"Tip: Public rooms appear as the network refreshes around you.",
-		"Connecting private network peers...",
+		"Starting your private connection...",
+		"Tor is included for private routing.",
+		"Private rooms stay with the people you share them with.",
+		"Animasola connects directly instead of using one central chat server.",
+		"Public rooms appear as the network refreshes around you.",
+		"Connecting to other peers...",
 	}
 
 	return &TorSplashModel{
 		spinner:    s,
 		progressCh: ch,
-		lastMsg:    "Spawning Tor Background Process...",
+		lastMsg:    "Starting private connection...",
 		tips:       tips,
 		activeTip:  0,
 	}

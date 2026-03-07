@@ -57,6 +57,20 @@ type roomPolicyUpdatedMsg struct {
 	err error
 }
 
+type homePanelState string
+
+const (
+	homePanelPinned         homePanelState = "pinned"
+	homePanelSearch         homePanelState = "search"
+	homePanelCreate         homePanelState = "create"
+	homePanelJoin           homePanelState = "join"
+	homePanelInfo           homePanelState = "info"
+	homePanelConfirmDelete  homePanelState = "confirm_delete"
+	homePanelSyncing        homePanelState = "syncing"
+	homePanelResolving      homePanelState = "resolving"
+	homePanelProcessing     homePanelState = "processing"
+)
+
 type HomeModel struct {
 	sqlite *sqlite.Store
 	user   *sqlite.User
@@ -80,6 +94,7 @@ type HomeModel struct {
 	showingInfo       bool // Whether the Room Info Modal is open
 	copiedToast       bool // True if the room ID was just copied
 	processing        bool
+	busyAction        string
 	confirmingDelete  bool
 	roomNameInput     textinput.Model
 	roomPasswordInput textinput.Model
@@ -131,6 +146,42 @@ func NewHomeModel(s *sqlite.Store, u *sqlite.User, identity *keys.Keys, n *p2p.N
 	}
 }
 
+func (m *HomeModel) panelState() homePanelState {
+	switch {
+	case m.confirmingDelete:
+		return homePanelConfirmDelete
+	case m.showingInfo:
+		return homePanelInfo
+	case m.syncingRoom:
+		return homePanelSyncing
+	case m.resolvingRoom:
+		return homePanelResolving
+	case m.processing && m.busyAction != "":
+		return homePanelProcessing
+	case m.creatingRoom:
+		return homePanelCreate
+	case m.joiningRoom:
+		return homePanelJoin
+	case m.mode == "search":
+		return homePanelSearch
+	default:
+		return homePanelPinned
+	}
+}
+
+func (m *HomeModel) processingTitle() string {
+	switch m.busyAction {
+	case "sync":
+		return "Making room available..."
+	case "join", "resolve":
+		return "Joining room..."
+	case "create":
+		return "Creating your room..."
+	default:
+		return "Working..."
+	}
+}
+
 func (m *HomeModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
@@ -146,6 +197,7 @@ func (m *HomeModel) SetDiscovery(d *discovery.Service) {
 
 func (m *HomeModel) Init() tea.Cmd {
 	m.processing = false
+	m.busyAction = ""
 	m.err = nil
 	return m.FetchRooms()
 }
@@ -244,6 +296,7 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case error:
 		m.err = msg
 		m.processing = false
+		m.busyAction = ""
 		m.syncingRoom = false
 		m.resolvingRoom = false
 		return m, nil
@@ -290,11 +343,13 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case RoomCreatedNeedsSyncMsg:
 		m.processing = false
+		m.busyAction = "sync"
 		m.syncingRoom = true
 		return m, m.syncRoomDiscovery(msg.Room)
 
 	case RoomJoinNeedsSyncMsg:
 		m.processing = false
+		m.busyAction = "resolve"
 		m.resolvingRoom = true
 		return m, m.syncRoomJoin(msg)
 
@@ -373,12 +428,14 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// We only accept 'esc' to cancel the sync and return to the main menu.
 			if msg.String() == "esc" {
 				m.syncingRoom = false
+				m.busyAction = ""
 				return m, m.FetchRooms()
 			}
 			return m, nil
 		} else if m.resolvingRoom {
 			if msg.String() == "esc" {
 				m.resolvingRoom = false
+				m.busyAction = ""
 				return m, m.FetchRooms()
 			}
 			return m, nil
@@ -404,6 +461,7 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if name != "" {
 					m.creatingRoom = false
 					m.processing = true
+					m.busyAction = "create"
 					m.roomNameInput.SetValue("")
 					m.roomPasswordInput.SetValue("")
 					return m, m.createRoom(name, password)
@@ -440,6 +498,7 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if id != "" {
 					m.joiningRoom = false
 					m.processing = true
+					m.busyAction = "join"
 					m.joinIDInput.SetValue("")
 					m.joinPasswordInput.SetValue("")
 					return m, m.joinRoomByID(id, password)
@@ -736,7 +795,7 @@ func (m *HomeModel) View() string {
 	styleNormal := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 
 	if m.mode == "search" {
-		title := "🔍 Search / Join Public Rooms"
+		title := "Find a room"
 		if m.updateVersion != "" {
 			s.WriteString(lipgloss.NewStyle().Background(lipgloss.Color("205")).Foreground(lipgloss.Color("232")).Bold(true).Render(fmt.Sprintf(" 🚀 UPDATE AVAILABLE: %s — Check GitHub Releases! ", m.updateVersion)) + "\n\n")
 		}
@@ -760,12 +819,12 @@ func (m *HomeModel) View() string {
 
 	if len(m.rooms) == 0 {
 		if m.mode == "pinned" {
-			s.WriteString("You haven't joined any rooms. Press 's' to search or 'c' to create.\n")
+			s.WriteString("You have no rooms yet. Press 's' to find a room or 'c' to create one.\n")
 		} else {
 			if strings.TrimSpace(m.searchInput.Value()) == "" {
-				s.WriteString("Type a room name to search the public network. Press enter to try an exact room name.\n")
+				s.WriteString("Type a room name. Press enter to try that exact name.\n")
 			} else {
-				s.WriteString("No public rooms found matching your search. Press enter to attempt direct connection.\n")
+				s.WriteString("No rooms found. Press enter to try that exact name.\n")
 			}
 		}
 	} else {
@@ -793,41 +852,43 @@ func (m *HomeModel) View() string {
 
 	s.WriteString("\n\n")
 
-	if m.processing {
-		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true).Render("Deriving Cryptographic Identity...") + "\n(This takes ~2 seconds to defend against offline dictionary attacks)")
-	} else if m.confirmingDelete {
+	switch m.panelState() {
+	case homePanelProcessing:
+		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true).Render(m.processingTitle()))
+	case homePanelConfirmDelete:
 		if len(m.rooms) > 0 {
 			r := m.rooms[m.index]
 			isOwner, _ := m.sqlite.IsRoomOwner(context.Background(), m.user.ID, r.ID)
 			action := "Leave"
 			if isOwner {
-				action = "Delete (WARNING: Local DB only)"
+				action = "Remove"
 			}
 			s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Render(fmt.Sprintf("Are you sure you want to %s '%s'? (y/N)", action, r.Name)))
 		}
-	} else if m.syncingRoom {
-		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render("Publishing to Global Network..."))
+	case homePanelSyncing:
+		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render("Making room available..."))
 		s.WriteString("\n")
-		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("(Tor Kademlia routing may take 1 to 3 minutes to settle)"))
+		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("This can take a minute or two."))
 		s.WriteString("\n\n")
-		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("esc: Give Up (Room will be saved locally)"))
-	} else if m.resolvingRoom {
-		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render("Resolving Room on Global Tor Network..."))
+		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("esc: Cancel for now (the room stays saved locally)"))
+	case homePanelResolving:
+		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Render("Joining room..."))
 		s.WriteString("\n")
-		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("(Tor Kademlia DHT traversal may take 1 to 3 minutes)"))
+		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("This can take a minute or two."))
 		s.WriteString("\n\n")
-		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("esc: Cancel Join"))
-	} else if m.creatingRoom {
-		s.WriteString("Create Room:\n")
+		s.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("esc: Cancel"))
+	case homePanelCreate:
+		s.WriteString("Create a room\n")
 		s.WriteString("  Name:     " + m.roomNameInput.View() + "\n")
 		s.WriteString("  Password: " + m.roomPasswordInput.View() + "\n")
-		s.WriteString("  (tab to switch, esc to cancel, enter to submit)")
-	} else if m.joiningRoom {
-		s.WriteString("Join by ID:\n")
+		s.WriteString("  Leave password empty for a public room.\n")
+		s.WriteString("  tab: switch  esc: cancel  enter: create")
+	case homePanelJoin:
+		s.WriteString("Join a room\n")
 		s.WriteString("  Room ID:  " + m.joinIDInput.View() + "\n")
 		s.WriteString("  Password: " + m.joinPasswordInput.View() + "\n")
-		s.WriteString("  (tab to switch, esc to cancel, enter to submit)")
-	} else if m.showingInfo {
+		s.WriteString("  tab: switch  esc: cancel  enter: join")
+	case homePanelInfo:
 		if len(m.rooms) > 0 {
 			r := m.rooms[m.index]
 			creatorText := "You created this room"
@@ -835,9 +896,9 @@ func (m *HomeModel) View() string {
 			if err == nil && !isOwner {
 				creatorText = "You joined this room"
 			}
-			roomType := "Public Room"
+			roomType := "Public room"
 			if r.IsPrivate {
-				roomType = "Private Encrypted Room"
+				roomType = "Private room"
 			}
 
 			box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).Padding(1, 2)
@@ -892,7 +953,9 @@ func (m *HomeModel) View() string {
 			}
 			s.WriteString(box.Render(content))
 		}
-	} else if m.mode == "search" {
+	}
+
+	if m.mode == "search" {
 		s.WriteString("type: Search • up/down (or tab): Navigate • esc: Back to Pinned • enter: Join selected (or exact name)")
 	} else {
 		s.WriteString("j/k: Navigate • enter: Open • s: Search • c: Create • p: Join by ID • i: Room Info • x: Delete/Leave • q: Quit")
