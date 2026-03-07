@@ -552,7 +552,10 @@ func (m *HomeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// If we have a selected room, join it!
 				if len(m.rooms) > 0 && m.index < len(m.rooms) {
 					r := m.rooms[m.index]
-					_ = m.sqlite.JoinRoom(context.Background(), m.user.ID, r.ID)
+					if _, err := m.sqlite.JoinExternalRoom(context.Background(), r.ID, r.Name, m.user.ID, r.IsPrivate, r.RoomKey); err != nil {
+						m.err = err
+						return m, nil
+					}
 					_ = m.sqlite.MarkRoomAsRead(context.Background(), m.user.ID, r.ID)
 					return m, func() tea.Msg {
 						return OpenRoomMsg{
