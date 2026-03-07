@@ -96,6 +96,86 @@ func TestDiscoveryPropagatesNewestPublicRoomMetadata(t *testing.T) {
 	waitForIndexedRoom(t, ctx, storeB, room.ID, "beta", 2)
 }
 
+func TestDiscoveryAcceptsForwardedPublicRoomAnnouncements(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	mn := mocknet.New()
+
+	keysA := mustGenerateKeys(t)
+	keysB := mustGenerateKeys(t)
+	keysC := mustGenerateKeys(t)
+
+	hostA := mustAddPeer(t, mn, keysA, 10101)
+	hostB := mustAddPeer(t, mn, keysB, 10102)
+	hostC := mustAddPeer(t, mn, keysC, 10103)
+
+	if err := mn.LinkAll(); err != nil {
+		t.Fatalf("link mocknet: %v", err)
+	}
+	if _, err := mn.ConnectPeers(hostA.ID(), hostB.ID()); err != nil {
+		t.Fatalf("connect A-B: %v", err)
+	}
+	if _, err := mn.ConnectPeers(hostB.ID(), hostC.ID()); err != nil {
+		t.Fatalf("connect B-C: %v", err)
+	}
+
+	pubsubA, err := pubsub.NewGossipSub(ctx, hostA)
+	if err != nil {
+		t.Fatalf("create pubsub A: %v", err)
+	}
+	pubsubB, err := pubsub.NewGossipSub(ctx, hostB)
+	if err != nil {
+		t.Fatalf("create pubsub B: %v", err)
+	}
+	pubsubC, err := pubsub.NewGossipSub(ctx, hostC)
+	if err != nil {
+		t.Fatalf("create pubsub C: %v", err)
+	}
+
+	nodeA := p2p.NewNodeFromParts(hostA, pubsubA, keysA)
+	nodeB := p2p.NewNodeFromParts(hostB, pubsubB, keysB)
+	nodeC := p2p.NewNodeFromParts(hostC, pubsubC, keysC)
+	t.Cleanup(func() { _ = nodeA.Close() })
+	t.Cleanup(func() { _ = nodeB.Close() })
+	t.Cleanup(func() { _ = nodeC.Close() })
+
+	storeA, userA := mustOpenStoreAndUser(t, "forward-a.db", hostA.ID().String())
+	storeB, userB := mustOpenStoreAndUser(t, "forward-b.db", hostB.ID().String())
+	storeC, userC := mustOpenStoreAndUser(t, "forward-c.db", hostC.ID().String())
+	defer storeA.Close()
+	defer storeB.Close()
+	defer storeC.Close()
+
+	serviceA := discovery.NewService(nodeA, storeA, userA, nil)
+	serviceB := discovery.NewService(nodeB, storeB, userB, nil)
+	serviceC := discovery.NewService(nodeC, storeC, userC, nil)
+	if err := serviceA.Start(make(chan sqlite.Room, 8)); err != nil {
+		t.Fatalf("start discovery A: %v", err)
+	}
+	if err := serviceB.Start(make(chan sqlite.Room, 8)); err != nil {
+		t.Fatalf("start discovery B: %v", err)
+	}
+	if err := serviceC.Start(make(chan sqlite.Room, 8)); err != nil {
+		t.Fatalf("start discovery C: %v", err)
+	}
+	t.Cleanup(func() { _ = serviceA.Close() })
+	t.Cleanup(func() { _ = serviceB.Close() })
+	t.Cleanup(func() { _ = serviceC.Close() })
+
+	room, err := storeA.CreateRoom(ctx, "forwarded", "from-a", userA.ID, false, "")
+	if err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	room.CreatorID = hostA.ID().String()
+
+	if err := serviceA.PublishRoomSync(ctx, room); err != nil {
+		t.Fatalf("publish forwarded room: %v", err)
+	}
+
+	waitForIndexedRoom(t, ctx, storeC, room.ID, "forwarded", 1)
+}
+
 func mustGenerateKeys(t *testing.T) *keys.Keys {
 	t.Helper()
 

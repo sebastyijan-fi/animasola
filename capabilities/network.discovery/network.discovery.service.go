@@ -218,10 +218,10 @@ func (s *Service) listen(ctx context.Context, sub *pubsub.Subscription, discover
 			continue
 		}
 
-		if discoveryMsg.CreatorID == "" || discoveryMsg.CreatorID != msg.ReceivedFrom.String() {
+		if discoveryMsg.CreatorID == "" {
 			continue
 		}
-		if !verifyMessage(discoveryMsg, msg.ReceivedFrom.String()) {
+		if !verifyMessage(discoveryMsg, discoveryMsg.CreatorID) {
 			continue
 		}
 
@@ -354,8 +354,8 @@ func (s *Service) signMessage(msg roomDiscoveryMessage) string {
 	return s.node.Identity.Sign(signingPayload(msg))
 }
 
-func verifyMessage(msg roomDiscoveryMessage, receivedFrom string) bool {
-	peerID, err := peer.Decode(receivedFrom)
+func verifyMessage(msg roomDiscoveryMessage, creatorID string) bool {
+	peerID, err := peer.Decode(creatorID)
 	if err != nil {
 		return false
 	}
