@@ -69,6 +69,10 @@ func main() {
 		tui.RunBundleVerifier(ctx, bundleDir)
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "uninstall" {
+		tui.RunUninstall(ctx, os.Args[2:])
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "version" {
 		fmt.Println("animasola", tuiVersion())
 		return
@@ -77,7 +81,7 @@ func main() {
 	if os.Geteuid() == 0 {
 		fmt.Println("❌ SECURITY ERROR: Please do not run the Animasola chat client as root.")
 		fmt.Println("   Running the application with 'sudo' creates isolated shadow profiles in /root/.config/animasola/.")
-		fmt.Println("   If you are trying to update the application, run 'sudo animasola update' instead.")
+		fmt.Println("   Install and run Animasola as your normal user instead.")
 		os.Exit(1)
 	}
 

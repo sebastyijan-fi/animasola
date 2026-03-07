@@ -48,15 +48,19 @@ You can use the industry-standard independent security tool **[VirusTotal](https
 ### Step 4: "Install" It So You Can Use It Anywhere
 Right now, you can only run the app if you are sitting inside the unpacked folder. That is annoying! 
 
-We want you to be able to open a terminal *anywhere* and just type `animasola` to launch it. The bundle includes an installer script that places the app in a standard system location and keeps the bundled Tor runtime alongside it.
+We want you to be able to open a terminal *anywhere* and just type `animasola` to launch it. The installer keeps everything inside your own home directory so installs, updates, and uninstalls all stay clean and do not need `sudo`.
 
 1. Copy and paste this command and press Enter:
    ```bash
-   sudo ./install.sh ~/Downloads/animasola-linux-amd64.tar.gz
+   ./install.sh ~/Downloads/animasola-linux-amd64.tar.gz
    ```
-2. It will ask for your computer password. When you type your password, **the keys won't show up on screen** (this is normal security). Just type it and press Enter.
 
-*(What did we just do? The installer put the app in `/usr/local/bin/animasola` and installed its bundled private network runtime, including Tor, alongside it so `animasola` can start without extra setup.)*
+*(What did we just do? The installer put the app in `~/.local/share/animasola/current` and created a launcher at `~/.local/bin/animasola`, keeping the bundled private network runtime, including Tor, alongside it.)*
+
+If you want the shortest possible install path, this also works:
+```bash
+curl -fsSL https://animasola.org/install.sh | bash
+```
 
 ### Step 5: Launch It!
 You are done! You can now close your terminal, open a brand new one anywhere, and simply type:
@@ -71,7 +75,7 @@ Animasola includes a built-in updater.
 When a new version is released, you will see a banner at the top of the chat: `🚀 UPDATE AVAILABLE`.
 To upgrade securely, simply close the app and run:
 ```bash
-sudo animasola update
+animasola update
 ```
 *(This command downloads the latest release and swaps your executable file atomically.)*
 
@@ -83,6 +87,17 @@ If startup fails, run:
 animasola doctor
 ```
 This prints your version, config directory, profile count, and whether Animasola can find its bundled Tor runtime.
+
+### Step 8: Uninstalling Animasola
+To remove the installed app files:
+```bash
+animasola uninstall
+```
+
+To also remove your local profiles, database, and config:
+```bash
+animasola uninstall --purge
+```
 
 If you are coming from a much older alpha build, Animasola may decide that your old local database is not compatible anymore. In that case, it will archive/reset the old database instead of crashing. That keeps the app usable, but it can mean old local chat history does not carry forward from broken alpha-era data.
 

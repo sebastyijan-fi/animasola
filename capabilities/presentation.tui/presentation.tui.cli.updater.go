@@ -29,12 +29,13 @@ func RunAutoUpdater(ctx context.Context) {
 	}
 	execDir := filepath.Dir(execPath)
 
-	// 2. Validate Write Permissions (Crucial if binary is in /usr/local/bin)
+	// 2. Validate Write Permissions for the bundled user-local install root.
 	testFile := filepath.Join(execDir, ".animasola.write.test")
 	if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
 		fmt.Printf("\n❌ Error: Permission Denied to modify '%s'\n", execDir)
-		fmt.Println("   You must run the updater with elevated privileges.")
-		fmt.Println("   Try again using: sudo animasola update")
+		fmt.Println("   This install is not writable by the current user.")
+		fmt.Println("   Reinstall Animasola using the user-local installer:")
+		fmt.Println("   curl -fsSL https://animasola.org/install.sh | bash")
 		os.Exit(1)
 	}
 	_ = os.Remove(testFile) // Clean up test

@@ -1,0 +1,68 @@
+package tui
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+func RunUninstall(_ context.Context, args []string) {
+	purge := false
+	for _, arg := range args {
+		switch arg {
+		case "--purge":
+			purge = true
+		default:
+			fmt.Printf("❌ Unknown uninstall option: %s\n", arg)
+			os.Exit(1)
+		}
+	}
+
+	if os.Geteuid() == 0 {
+		fmt.Println("❌ Please do not run 'animasola uninstall' as root.")
+		fmt.Println("   Animasola uses a user-local install and user-local data path.")
+		os.Exit(1)
+	}
+
+	execPath, err := os.Executable()
+	if err != nil {
+		fmt.Printf("❌ Could not resolve active binary path: %v\n", err)
+		os.Exit(1)
+	}
+	execDir := filepath.Dir(execPath)
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("❌ Could not resolve home directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	installBase := filepath.Join(homeDir, ".local", "share", "animasola")
+	installRoot := filepath.Clean(execDir)
+	if !strings.HasPrefix(installRoot, installBase+string(filepath.Separator)) {
+		fmt.Println("❌ This does not look like a user-local Animasola install.")
+		fmt.Println("   Reinstall with: curl -fsSL https://animasola.org/install.sh | bash")
+		os.Exit(1)
+	}
+
+	binTarget := filepath.Join(homeDir, ".local", "bin", "animasola")
+	_ = os.Remove(binTarget)
+	_ = os.RemoveAll(installRoot)
+
+	remaining, _ := os.ReadDir(installBase)
+	if len(remaining) == 0 {
+		_ = os.Remove(installBase)
+	}
+
+	if purge {
+		_ = os.RemoveAll(filepath.Join(homeDir, ".config", "animasola"))
+		_ = os.RemoveAll(installBase)
+	}
+
+	fmt.Println("Animasola uninstalled.")
+	if purge {
+		fmt.Println("Local config and profile data were removed.")
+	}
+}
