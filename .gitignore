@@ -13,17 +13,7 @@ coverage.out
 # Local binaries commonly produced at repo root
 /animasola
 /main
-/headless
-/telemetry
-/p2p-debug
-/bootstrap-node
 *.exe
-
-# Generated release artifacts
-/releases/
-*.AppImage
-*.zip
-*.tar.gz
 
 # Local runtime data
 *.db
@@ -36,8 +26,13 @@ coverage.out
 .env
 .env.*
 
-# Local signing keys
-.keys/
-
-# Local scratch assets
-logo.jpeg
+# Node / frontend outputs (if present in repo)
+node_modules/
+.npm/
+.pnpm-store/
+.next/
+out/
+dist/
+build/
+.turbo/
+coverage/
