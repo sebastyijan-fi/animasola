@@ -25,6 +25,8 @@ coverage.out
 # Environment files
 .env
 .env.*
+logs/
+log/
 
 # Node / frontend outputs (if present in repo)
 node_modules/
